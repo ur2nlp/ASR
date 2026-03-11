@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.eggs/
+
+# Environment
+.env
+*.env
+environment.local.yml
+
+# Data (external datasets fetched by scripts, not tracked)
+data/
+!data/.gitkeep
+
+# Outputs
+outputs/
+models/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HuggingFace cache
+.cache/
+
+# Logs
+*.log
+wandb/
+
+# KenLM artifacts
+*.arpa
+*.binary

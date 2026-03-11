@@ -1,0 +1,40 @@
+defaults:
+  - _self_
+  - model: xls-r
+  - training: l40_basic
+
+seed: 1
+
+dataset:
+  type: ???
+  id: ???
+  cache_dir: "data/${dataset.id}"
+  audio_column: audio
+  text_column: transcription
+  dev_size: 0.1
+  max_audio_length_seconds: 30.0
+
+preprocessing:
+  lowercase: true
+  remove_punctuation: true
+  unicode_normalize: NFC
+  custom_replacements: {}
+
+audio:
+  sampling_rate: 16000
+  feature_size: 1
+  do_normalize: true
+  return_attention_mask: true
+
+lm:
+  enabled: false
+  arpa_path: null
+  alpha: 0.5
+  beta: 1.5
+  beam_width: 100
+
+output_dir: models
+fresh_dataset: false
+fresh_processed: false
+fresh_model: false
+resume_from_checkpoint: null
