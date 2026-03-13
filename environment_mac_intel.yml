@@ -1,0 +1,23 @@
+name: asr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11.*
+  - accelerate>=0.26
+  - datasets=3.*
+  - evaluate
+  - hydra-core=1.*
+  - jiwer
+  - numpy<2.0
+  - plotnine
+  - pyctcdecode
+  - pytest
+  - pyyaml
+  - transformers>=4.40,<5
+  - tqdm
+  - pip
+  - pip:
+    - torch==2.2.*
+    - torchaudio
+    - kenlm
+    - soundfile
