@@ -41,8 +41,13 @@ def setup_model(args: DictConfig, processor: ProcessorMixin):
         "vocab_size": vocab_size,
     }
 
+    # ignore_mismatched_sizes lets us adapt from an already-fine-tuned CTC
+    # checkpoint whose lm_head size differs from our new vocab: the mismatched
+    # head is freshly initialized while the rest of the weights load normally.
+    # Base (non-CTC) checkpoints have no lm_head, so this is a no-op for them.
     model = model_class.from_pretrained(
         args.model.pretrained_name,
+        ignore_mismatched_sizes=True,
         **config_overrides,
     )
 
