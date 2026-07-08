@@ -123,7 +123,12 @@ class DatasetConfig(ArtifactConfig):
         }
 
         dataset_type = args.dataset.type
-        if dataset_type == "audiofolder":
+        if dataset_type == "paired":
+            config["path"] = args.dataset.path
+            config["audio_ext"] = args.dataset.get("audio_ext", ".wav")
+            config["transcript_ext"] = args.dataset.get("transcript_ext", ".txt")
+            config["recursive"] = args.dataset.get("recursive", False)
+        elif dataset_type == "audiofolder":
             config["path"] = args.dataset.path
         elif dataset_type == "huggingface":
             config["name"] = args.dataset.name

@@ -8,6 +8,7 @@ dependencies:
   - evaluate
   - hydra-core=1.*
   - jiwer
+  - librosa
   - numpy<2.0
   - plotnine
   - pyctcdecode

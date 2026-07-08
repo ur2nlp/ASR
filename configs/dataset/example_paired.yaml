@@ -1,0 +1,29 @@
+# Template for a local corpus of matched audio/transcript files.
+#
+# Each audio file (e.g. utt001.wav) has a sibling text file of the same stem
+# (utt001.txt) holding its transcription. Point `path` at the directory that
+# contains those pairs.
+#
+# To use: copy this file to configs/dataset/<your_language>.yaml, set `id`
+# and `path`, then run:
+#
+#     python -m src dataset=<your_language>
+#
+# Fields not listed here (cache_dir, audio_column, text_column, dev_size,
+# max_audio_length_seconds) inherit their defaults from configs/main.yaml.
+
+type: paired
+
+# Short identifier for this corpus; used in cache and output directory paths.
+id: example
+
+# Directory containing the .wav/.txt pairs (flat, or with train/dev/test
+# subdirectories). Relative paths are resolved from the repo root.
+path: data/example/raw
+
+# File extensions to pair. Change audio_ext for .flac/.mp3/.ogg corpora.
+audio_ext: .wav
+transcript_ext: .txt
+
+# Set true if pairs live in nested subfolders (e.g. per-speaker directories).
+recursive: false

@@ -1,0 +1,18 @@
+# @package _global_
+# Extra held-out evaluation sets, monitored during training alongside the dev
+# split. Each entry is a directory of matched audio/transcript files (the same
+# layout as a `paired` dataset); its transcriptions are normalized with the same
+# `preprocessing` settings as the training data. Metrics are reported as
+# eval_{name}_wer / eval_{name}_cer, and best-checkpoint selection continues to
+# track the dev set.
+#
+# Copy this file to configs/external_eval/<your_name>.yaml and select it with
+# `external_eval=<your_name>`. Names must not collide with the dev split.
+external_eval_sets:
+  - name: clean_test
+    path: data/zulu/clean_test    # directory of .wav/.txt pairs
+    # audio_ext: .wav
+    # transcript_ext: .txt
+    # recursive: false
+  - name: noisy_test
+    path: data/zulu/noisy_test

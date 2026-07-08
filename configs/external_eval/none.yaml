@@ -1,0 +1,4 @@
+# @package _global_
+# No external evaluation sets (default). Only the automatic dev split is used
+# for evaluation and best-checkpoint selection.
+external_eval_sets: null
