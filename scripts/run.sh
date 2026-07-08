@@ -49,7 +49,7 @@ if [ -n "$EXPERIMENT_ID" ]; then
     experiment_id_override=(experiment_id="$EXPERIMENT_ID")
 fi
 
-python -u src/__main__.py \
+python -u -m src \
     dataset="$DATASET" \
     model="$MODEL" \
     training="$TRAINING" \
