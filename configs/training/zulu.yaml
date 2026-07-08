@@ -1,0 +1,61 @@
+# Training preset tuned for the Zulu corpus (fork-specific).
+#
+# Deltas from l40_basic, for ~150 hr of conversational, code-switched,
+# timestamp-segmented speech on a single L40/L40S (effective batch 32):
+#   * learning_rate 3e-5 -> 1e-4 : 3e-5 undertrains XLS-R CTC at this data size;
+#     1e-4 is the center of the standard fine-tuning range (sweep 5e-5..3e-4).
+#   * max_steps 50000 -> 20000  : ~13 epochs here; keeps the linear LR schedule
+#     annealing within a run you will actually finish (early stopping still guards
+#     overfit to noisy transcripts).
+#   * mask_feature_prob 0.0 -> 0.01 : add SpecAugment feature masking alongside
+#     the time masking for a little more regularization on noisy/conversational
+#     data. mask_time_prob left at the 0.05 default.
+# Inherited robustness defaults (ctc_zero_infinity, group_by_length) are kept.
+name: zulu
+
+num_train_epochs: 100  # ceiling; training is controlled by max_steps
+max_steps: 20000
+per_device_train_batch_size: 16
+per_device_eval_batch_size: 16
+gradient_accumulation_steps: 2
+gradient_checkpointing: true
+learning_rate: 1e-4
+lr_scheduler_type: linear
+warmup_ratio: 0.1
+max_grad_norm: 1.0
+
+# regularization and masking (override pretrained defaults)
+dropout: 0.1
+attention_dropout: 0.1
+hidden_dropout: 0.1
+feat_proj_dropout: 0.1
+mask_time_prob: 0.05
+mask_feature_prob: 0.01
+layerdrop: 0.0
+ctc_loss_reduction: mean
+ctc_zero_infinity: true
+weight_decay: 0.01
+
+logging_steps: ${divide:${training.max_steps},400}
+eval_strategy: steps
+eval_steps: ${divide:${training.max_steps},100}
+save_strategy: steps
+save_steps: ${divide:${training.max_steps},100}
+save_total_limit: 2
+load_best_model_at_end: true
+metric_for_best_model: wer
+greater_is_better: false
+
+bf16: true
+optim: adamw_torch_fused
+dataloader_num_workers: 4
+group_by_length: true
+
+# freezing
+freeze_feature_extractor: true
+freeze_encoder_layers: 0
+
+early_stopping_patience: 10
+early_stopping_delay_ratio: 0.0
+
+unfreeze_step_ratio: null
