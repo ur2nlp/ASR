@@ -1,0 +1,27 @@
+# Zulu fine-tuning corpus (fork-specific).
+#
+# The raw corpus is long-form: 5-minute recordings paired with timestamped
+# transcripts as sibling {stem}.wav / {stem}.txt files in data/zulu/raw/. Those
+# are NOT consumable directly. Run the segmentation step first:
+#
+#     python tools/prepare_zulu.py
+#
+# which slices each recording at its timestamps into short .wav/.txt utterance
+# pairs (16 kHz mono) under data/zulu/prepared/ -- the layout this config points
+# at. Then train:
+#
+#     python -m src dataset=zulu
+
+type: paired
+
+# Short identifier; used in cache and output directory paths.
+id: zulu
+
+# Directory of segmented .wav/.txt pairs produced by scripts/prepare_zulu.py.
+path: data/zulu/prepared
+
+audio_ext: .wav
+transcript_ext: .txt
+
+# Segmented pairs live flat in one directory, not nested per speaker.
+recursive: false
