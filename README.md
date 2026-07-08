@@ -63,11 +63,12 @@ python -m src dataset=zulu model=w2vbert2 training.learning_rate=1e-5
 Checkpoints are written to `models/{id}/{model_short_name}_{training_name}/`
 (e.g. `models/zulu/xlsr300m_l40_basic/`), with the best checkpoint under
 `best-checkpoint/`. Two runs with the same model and training config would
-overwrite each other, so give each run in a sweep a **codename**:
+overwrite each other, so give each run in a sweep an **experiment id**, which is
+appended as a suffix to that path:
 
 ```bash
-python -m src dataset=zulu model_name=zulu_lr1e-5 training.learning_rate=1e-5
-# → models/zulu_lr1e-5/
+python -m src dataset=zulu experiment_id=lr1e-5 training.learning_rate=1e-5
+# → models/zulu/xlsr300m_l40_basic_lr1e-5/
 ```
 
 > **macOS note:** CTC loss has no native MPS kernel. To run locally on Apple

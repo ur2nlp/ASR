@@ -35,8 +35,12 @@ def setup_model(args: DictConfig, processor: ProcessorMixin):
         "hidden_dropout": args.training.hidden_dropout,
         "feat_proj_dropout": args.training.feat_proj_dropout,
         "mask_time_prob": args.training.mask_time_prob,
+        "mask_feature_prob": args.training.get("mask_feature_prob", 0.0),
         "layerdrop": args.training.layerdrop,
         "ctc_loss_reduction": args.training.ctc_loss_reduction,
+        # zero out non-finite CTC losses (transcript longer than the audio can
+        # emit); important for auto-segmented data with imprecise boundaries
+        "ctc_zero_infinity": args.training.get("ctc_zero_infinity", False),
         "pad_token_id": pad_token_id,
         "vocab_size": vocab_size,
     }

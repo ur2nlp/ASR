@@ -241,8 +241,15 @@ class TestLoadExternalEvalSets:
         )
 
         assert set(result.keys()) == {"clean", "noisy"}
-        assert set(result["clean"].column_names) == {"input_values", "labels"}
+        assert set(result["clean"].column_names) == {
+            "input_values",
+            "labels",
+            "input_length",
+        }
         assert len(result["clean"]) == 1
+        # input_length must match the feature length for group_by_length batching
+        example = result["clean"][0]
+        assert example["input_length"] == len(example["input_values"])
 
     def test_normalizes_transcriptions(
         self, tmp_dir, preprocessing_config, wav2vec2_processor

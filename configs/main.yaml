@@ -37,15 +37,20 @@ lm:
   beam_width: 100
 
 output_dir: models
-# Optional codename. When set, the run is written to `${output_dir}/${model_name}`
-# instead of the auto-encoded `${output_dir}/${dataset.id}/{model_short}_{training}`
-# path, so repeated runs over the same model/training config (e.g. a hyperparameter
-# sweep) do not overwrite each other.
-model_name: null
+# Optional run identifier. When set, it is appended as a suffix to the
+# auto-encoded output path
+# (`${output_dir}/${dataset.id}/{model_short}_{training}_{experiment_id}`), so
+# repeated runs over the same model/training config (e.g. a hyperparameter sweep)
+# do not overwrite each other while keeping the descriptive path.
+experiment_id: null
 fresh_dataset: false
 fresh_processed: false
 fresh_model: false
 resume_from_checkpoint: null
+# When true, and no explicit resume_from_checkpoint is given, auto-resume from the
+# latest checkpoint in the output directory. Intended for preempt + re-queue
+# cluster workflows so a requeued job continues instead of restarting from step 0.
+preempt_resume: false
 
 # Keep Hydra's per-run working directory (logs + resolved-config dump) out of the
 # way instead of littering the repo root with dated `outputs/YYYY-MM-DD/` folders.
