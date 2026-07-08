@@ -23,6 +23,7 @@ from src.data import (
     DataCollatorCTCWithPadding,
     ensure_train_dev_split,
     load_dataset_from_config,
+    load_external_eval_sets,
     normalize_dataset,
     prepare_dataset_for_training,
 )
@@ -36,7 +37,16 @@ OmegaConf.register_new_resolver("divide", lambda x, y: int(x / y), replace=True)
 
 
 def _build_output_dir(args: DictConfig) -> str:
-    """Build output directory path encoding experiment conditions."""
+    """Build the output directory for this run.
+
+    If ``model_name`` is set, it is used as a clean codename
+    (``{output_dir}/{model_name}``) so that repeated runs over the same model and
+    training config do not overwrite each other. Otherwise the path encodes the
+    experiment conditions as ``{output_dir}/{id}/{model_short}_{training}``.
+    """
+    if args.get("model_name"):
+        return os.path.join(args.output_dir, args.model_name)
+
     language = args.dataset.id
     model_short = args.model.get("short_name", args.model.type)
     training_name = args.training.name
@@ -62,9 +72,24 @@ def _handle_cache_cleanup(args: DictConfig, cache_dir: str, output_dir: str) -> 
             print(f"Cleared all dataset caches: {cache_dir}", file=sys.stderr)
 
 
-def _build_training_arguments(args: DictConfig, output_dir: str) -> TrainingArguments:
-    """Construct TrainingArguments from config."""
+def _build_training_arguments(
+    args: DictConfig,
+    output_dir: str,
+    metric_for_best_model: str | None = None,
+) -> TrainingArguments:
+    """Construct TrainingArguments from config.
+
+    Args:
+        args: Full Hydra config.
+        output_dir: Directory for checkpoints and the best model.
+        metric_for_best_model: Overrides ``training.metric_for_best_model`` when
+            given. Used when external eval sets turn ``eval_dataset`` into a dict,
+            which makes HuggingFace prefix each metric with its set name (so the
+            dev metric becomes e.g. ``dev_wer`` rather than ``wer``).
+    """
     training = args.training
+    if metric_for_best_model is None:
+        metric_for_best_model = training.metric_for_best_model
     return TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=training.num_train_epochs,
@@ -83,7 +108,7 @@ def _build_training_arguments(args: DictConfig, output_dir: str) -> TrainingArgu
         save_steps=training.get("save_steps"),
         save_total_limit=training.save_total_limit,
         load_best_model_at_end=training.load_best_model_at_end,
-        metric_for_best_model=training.metric_for_best_model,
+        metric_for_best_model=metric_for_best_model,
         greater_is_better=training.greater_is_better,
         logging_steps=training.logging_steps,
         bf16=training.get("bf16", False),
@@ -122,6 +147,71 @@ def _build_callbacks(args: DictConfig) -> list:
         callbacks.append(UnfreezeCallback(unfreeze_step=unfreeze_step))
 
     return callbacks
+
+
+def _resolve_external_eval_sets(args: DictConfig) -> list | None:
+    """Resolve external eval set configs from the config group or a CLI override.
+
+    Supports both ``external_eval=<name>`` (config group) and a direct
+    ``external_eval_sets=[...]`` override on the command line.
+    """
+    external_eval_sets = args.get("external_eval_sets")
+    if external_eval_sets is None and "external_eval" in args:
+        external_eval_sets = args.external_eval.get("external_eval_sets")
+    return external_eval_sets
+
+
+def _add_external_eval_sets(
+    eval_dataset,
+    primary_key: str | None,
+    external_eval_sets: list,
+    metric_for_best_model: str,
+    args: DictConfig,
+    processor,
+) -> tuple[dict, str]:
+    """Fold external eval sets into a dict-valued eval_dataset.
+
+    When ``eval_dataset`` becomes a dict, HuggingFace prefixes each metric with
+    its set name, so best-checkpoint selection must track the primary dev set's
+    qualified metric (e.g. ``dev_wer``). Returns the eval dict and the possibly
+    rewritten ``metric_for_best_model``.
+    """
+    eval_dict: dict = {}
+    if eval_dataset is not None:
+        primary_key = primary_key or "dev"
+        eval_dict[primary_key] = eval_dataset
+    else:
+        primary_key = None
+        print(
+            "Warning: external eval sets configured but no dev/test split exists; "
+            "best-checkpoint selection may not track a meaningful metric.",
+            file=sys.stderr,
+        )
+
+    extra_sets = load_external_eval_sets(
+        external_eval_sets,
+        preprocessing_config=args.preprocessing,
+        processor=processor,
+        model_type=args.model.type,
+        sampling_rate=args.audio.sampling_rate,
+        max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
+    )
+    for name, dataset in extra_sets.items():
+        if name in eval_dict:
+            raise ValueError(
+                f"External eval set name '{name}' conflicts with an existing "
+                f"eval set: {list(eval_dict.keys())}"
+            )
+        eval_dict[name] = dataset
+
+    if primary_key is not None:
+        already_qualified = metric_for_best_model.startswith(
+            (f"{primary_key}_", f"eval_{primary_key}_")
+        )
+        if not already_qualified:
+            metric_for_best_model = f"{primary_key}_{metric_for_best_model}"
+
+    return eval_dict, metric_for_best_model
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="main")
@@ -189,7 +279,6 @@ def main(args: DictConfig) -> None:
     model = setup_model(args, processor)
 
     # --- Stage 5: Train ---
-    training_args = _build_training_arguments(args, output_dir)
     callbacks = _build_callbacks(args)
     compute_metrics = make_compute_metrics(processor)
 
@@ -201,6 +290,23 @@ def main(args: DictConfig) -> None:
     # determine eval dataset (prefer dev, fall back to test)
     eval_split = "dev" if "dev" in dataset else "test" if "test" in dataset else None
     eval_dataset = dataset[eval_split] if eval_split else None
+    metric_for_best_model = args.training.metric_for_best_model
+
+    # optional external held-out eval sets (config group or CLI override)
+    external_eval_sets = _resolve_external_eval_sets(args)
+    if external_eval_sets:
+        eval_dataset, metric_for_best_model = _add_external_eval_sets(
+            eval_dataset=eval_dataset,
+            primary_key=eval_split,
+            external_eval_sets=external_eval_sets,
+            metric_for_best_model=metric_for_best_model,
+            args=args,
+            processor=processor,
+        )
+
+    training_args = _build_training_arguments(
+        args, output_dir, metric_for_best_model=metric_for_best_model
+    )
 
     trainer = Trainer(
         model=model,

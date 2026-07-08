@@ -2,12 +2,15 @@ defaults:
   - _self_
   - model: xls-r
   - training: l40_basic
+  - dataset: ???
+  - external_eval: none
 
 seed: 1
 
+# Shared dataset defaults. The selected `dataset/<name>.yaml` config group
+# supplies `type`, `id`, and type-specific fields (e.g. `path`), and may
+# override any of the values below.
 dataset:
-  type: ???
-  id: ???
   cache_dir: "data/${dataset.id}"
   audio_column: audio
   text_column: transcription
@@ -34,7 +37,20 @@ lm:
   beam_width: 100
 
 output_dir: models
+# Optional codename. When set, the run is written to `${output_dir}/${model_name}`
+# instead of the auto-encoded `${output_dir}/${dataset.id}/{model_short}_{training}`
+# path, so repeated runs over the same model/training config (e.g. a hyperparameter
+# sweep) do not overwrite each other.
+model_name: null
 fresh_dataset: false
 fresh_processed: false
 fresh_model: false
 resume_from_checkpoint: null
+
+# Keep Hydra's per-run working directory (logs + resolved-config dump) out of the
+# way instead of littering the repo root with dated `outputs/YYYY-MM-DD/` folders.
+hydra:
+  run:
+    dir: outputs/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/hydra/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
