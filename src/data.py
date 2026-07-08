@@ -412,6 +412,10 @@ def _feature_extract_and_encode(
         )
         example[input_column] = inputs[input_column][0]
 
+        # record length for length-grouped batching (group_by_length); works for
+        # both 1D input_values (samples) and 2D input_features (frames)
+        example["input_length"] = len(example[input_column])
+
         # encode labels
         example["labels"] = processor.tokenizer(
             example["transcription"],

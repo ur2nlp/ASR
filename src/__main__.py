@@ -120,6 +120,8 @@ def _build_training_arguments(
         optim=training.get("optim", "adamw_torch"),
         dataloader_num_workers=training.get("dataloader_num_workers", 0),
         gradient_checkpointing=training.get("gradient_checkpointing", False),
+        group_by_length=training.get("group_by_length", False),
+        length_column_name="input_length",
         seed=args.seed,
         report_to="none",
         remove_unused_columns=False,

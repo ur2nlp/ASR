@@ -17,8 +17,12 @@ attention_dropout: 0.1
 hidden_dropout: 0.1
 feat_proj_dropout: 0.1
 mask_time_prob: 0.05
+mask_feature_prob: 0.0  # SpecAugment feature masking; raise (~0.01) to regularize
 layerdrop: 0.0
 ctc_loss_reduction: mean
+# zero out non-finite CTC losses instead of letting them poison the gradient;
+# a robustness default, important for auto-segmented / imperfectly-aligned data
+ctc_zero_infinity: true
 weight_decay: 0.01
 
 logging_steps: ${divide:${training.max_steps},400}
@@ -34,6 +38,9 @@ greater_is_better: false
 bf16: true
 optim: adamw_torch_fused
 dataloader_num_workers: 4
+# batch length-similar clips together to cut padding waste (audio varies widely
+# in length); uses the input_length column added during feature extraction
+group_by_length: true
 
 # freezing
 freeze_feature_extractor: true
