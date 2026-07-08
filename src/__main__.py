@@ -12,6 +12,7 @@ import sys
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, TrainingArguments
+from transformers.trainer_utils import get_last_checkpoint
 
 from src.artifact_configs import DatasetConfig, ProcessedDatasetConfig
 from src.callbacks import (
@@ -39,18 +40,21 @@ OmegaConf.register_new_resolver("divide", lambda x, y: int(x / y), replace=True)
 def _build_output_dir(args: DictConfig) -> str:
     """Build the output directory for this run.
 
-    If ``model_name`` is set, it is used as a clean codename
-    (``{output_dir}/{model_name}``) so that repeated runs over the same model and
-    training config do not overwrite each other. Otherwise the path encodes the
-    experiment conditions as ``{output_dir}/{id}/{model_short}_{training}``.
+    The path encodes the experiment conditions as
+    ``{output_dir}/{id}/{model_short}_{training}``. If ``experiment_id`` is set,
+    it is appended as a suffix so that repeated runs over the same model and
+    training config (e.g. a hyperparameter sweep) do not overwrite each other
+    while keeping the descriptive path.
     """
-    if args.get("model_name"):
-        return os.path.join(args.output_dir, args.model_name)
-
     language = args.dataset.id
     model_short = args.model.get("short_name", args.model.type)
     training_name = args.training.name
-    return os.path.join(args.output_dir, language, f"{model_short}_{training_name}")
+    base_path = os.path.join(args.output_dir, language, f"{model_short}_{training_name}")
+
+    experiment_id = args.get("experiment_id")
+    if experiment_id:
+        return f"{base_path}_{experiment_id}"
+    return base_path
 
 
 def _handle_cache_cleanup(args: DictConfig, cache_dir: str, output_dir: str) -> None:
@@ -325,8 +329,13 @@ def main(args: DictConfig) -> None:
     with open(config_save_path, "w") as f:
         OmegaConf.save(args, f)
 
-    # train
+    # train; when preempt_resume is set (preempt + requeue cluster workflows),
+    # fall back to the latest checkpoint in output_dir if none is given explicitly
     checkpoint = args.get("resume_from_checkpoint")
+    if checkpoint is None and args.get("preempt_resume", False):
+        checkpoint = get_last_checkpoint(output_dir)
+        if checkpoint is not None:
+            print(f"Auto-resuming from checkpoint: {checkpoint}", file=sys.stderr)
     trainer.train(resume_from_checkpoint=checkpoint)
 
     # save best model
