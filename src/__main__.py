@@ -148,6 +148,13 @@ def _build_training_arguments(
         optim=training.get("optim", "adamw_torch"),
         dataloader_num_workers=training.get("dataloader_num_workers", 0),
         gradient_checkpointing=training.get("gradient_checkpointing", False),
+        # Reentrant checkpointing re-runs each checkpointed block inside
+        # backward and frees the saved graph as it goes, which an
+        # encoder-decoder trips over: Whisper's decoder attends to encoder
+        # states whose graph the encoder's own backward has already released,
+        # and the step dies with "Trying to backward through the graph a second
+        # time". The non-reentrant implementation keeps them alive.
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         group_by_length=training.get("group_by_length", False),
         length_column_name="input_length",
         seed=args.seed,
