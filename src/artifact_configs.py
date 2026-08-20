@@ -160,6 +160,12 @@ class ProcessedDatasetConfig(ArtifactConfig):
     sampling_rate: int
     max_audio_length_seconds: float | None
     vocab_size: int
+    max_label_length: int | None = None
+    # Only meaningful for multilingual seq2seq models, where they change the
+    # special tokens prefixed to every encoded transcript and therefore the
+    # cached labels.
+    language: str | None = None
+    task: str | None = None
 
     @classmethod
     def from_args(cls, args: DictConfig, vocab_size: int) -> "ProcessedDatasetConfig":
@@ -169,6 +175,9 @@ class ProcessedDatasetConfig(ArtifactConfig):
             sampling_rate=args.audio.sampling_rate,
             max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
             vocab_size=vocab_size,
+            max_label_length=args.dataset.get("max_label_length"),
+            language=args.model.get("language"),
+            task=args.model.get("task"),
         )
 
     def to_dict(self) -> dict:

@@ -1,0 +1,70 @@
+# Baseline Whisper fine-tuning preset for a single L40/L40S (effective batch 32).
+#
+# Deltas from the CTC presets, and why:
+#   * learning_rate 3e-5 -> 1e-5 : the standard Whisper fine-tuning rate. Whisper
+#     is a fully pretrained ASR model, not a self-supervised encoder with a fresh
+#     head, so it needs a gentler rate than XLS-R CTC to avoid washing out the
+#     decoder.
+#   * The CTC-only knobs (ctc_loss_reduction, ctc_zero_infinity, feat_proj_dropout,
+#     hidden_dropout, layerdrop) are absent -- WhisperConfig has no such fields.
+#     Encoder and decoder carry separate layerdrop rates instead.
+#   * group_by_length false : every clip is padded to Whisper's fixed 30 s window,
+#     so length-grouped batching sorts nothing and only adds bookkeeping.
+#   * freeze_feature_extractor false : Whisper's front end is a deterministic mel
+#     spectrogram followed by two trainable conv layers. Caching the mel features
+#     is always safe, so the conv stack is left trainable as in standard recipes.
+name: whisper_basic
+
+num_train_epochs: 100  # ceiling; training is controlled by max_steps
+max_steps: 20000
+per_device_train_batch_size: 16
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 2
+gradient_checkpointing: true
+learning_rate: 1e-5
+lr_scheduler_type: linear
+warmup_ratio: 0.05
+max_grad_norm: 1.0
+
+# regularization (override pretrained defaults)
+dropout: 0.0
+attention_dropout: 0.0
+activation_dropout: 0.0
+encoder_layerdrop: 0.0
+decoder_layerdrop: 0.0
+# SpecAugment over the encoder input; raise both to regularize on small corpora
+mask_time_prob: 0.05
+mask_feature_prob: 0.0
+weight_decay: 0.0
+
+# evaluation decodes autoregressively (predict_with_generate), which is far
+# slower than a CTC argmax -- evaluate less often than the CTC presets do
+logging_steps: ${divide:${training.max_steps},400}
+eval_strategy: steps
+eval_steps: ${divide:${training.max_steps},40}
+save_strategy: steps
+save_steps: ${divide:${training.max_steps},40}
+save_total_limit: 2
+load_best_model_at_end: true
+metric_for_best_model: wer
+greater_is_better: false
+
+# generation settings used during evaluation. 225 tokens comfortably covers
+# utterance-length transcripts; Whisper's hard decoder limit is 448.
+generation_max_length: 225
+generation_num_beams: 1
+
+bf16: true
+optim: adamw_torch_fused
+dataloader_num_workers: 4
+group_by_length: false
+
+# freezing
+freeze_feature_extractor: false
+freeze_encoder: false
+freeze_encoder_layers: 0
+
+early_stopping_patience: 10
+early_stopping_delay_ratio: 0.0
+
+unfreeze_step_ratio: null
