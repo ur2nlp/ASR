@@ -40,6 +40,23 @@ from src.decoding import build_processor_with_lm, decode_logits
 TARGET_SAMPLING_RATE = 16000
 
 
+def _require_ctc_checkpoint(model_dir: str) -> None:
+    """Fail fast on a seq2seq checkpoint rather than mis-decoding it.
+
+    This REPL decodes by argmax over per-frame logits and toggles KenLM shallow
+    fusion, neither of which applies to an autoregressive decoder.
+    """
+    from src.processors import get_spec_for_checkpoint
+
+    model_type, spec = get_spec_for_checkpoint(model_dir)
+    if spec.objective != "ctc":
+        raise ValueError(
+            f"{__file__} supports CTC checkpoints only, but {model_dir} is a "
+            f"'{model_type}' model with a '{spec.objective}' objective. "
+            f"Use `python -m tools.eval` for WER/CER on this checkpoint."
+        )
+
+
 def resolve_device(requested: str) -> torch.device:
     """Resolve a device string, auto-detecting CUDA/MPS when requested."""
     if requested != "auto":
@@ -64,6 +81,7 @@ class Transcriber:
         beam_width: int = 100,
     ) -> None:
         print(f"Loading model and processor from {model_dir}", file=sys.stderr)
+        _require_ctc_checkpoint(model_dir)
         self.processor = AutoProcessor.from_pretrained(model_dir)
         self.model = AutoModelForCTC.from_pretrained(model_dir).to(device)
         self.model.eval()
