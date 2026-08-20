@@ -1,0 +1,50 @@
+# Whisper small configured for the Zulu fork.
+#
+# Differs from model/whisper-small.yaml only in `language`, which the framework
+# refuses to default (see below). Everything else is inherited by copy rather
+# than by a Hydra defaults entry so that this file reads as a complete record of
+# what the fork runs.
+
+type: whisper
+pretrained_name: openai/whisper-small
+short_name: whisper_small_zu
+
+# THE FORK DECISION.
+#
+# Whisper has no `zu` token -- it was pretrained on 100 languages and Zulu is
+# not one of them (nor Xhosa; Afrikaans and Swahili are). The framework rejects
+# `null` here rather than defaulting, because null is not neutral: the tokenizer
+# would omit the language token from training labels while generate() detects
+# and inserts one, training and evaluating the decoder on different prefixes.
+#
+# `sw` is a repurposed proxy, not a claim that this is Swahili. Fine-tuning
+# re-maps whatever token is pinned here, so the choice only sets which
+# pretrained language embedding the adaptation starts from -- and which prior
+# over subword segmentation the decoder brings to Zulu text.
+#
+# Swahili is chosen on typology: like Zulu it is Bantu, so it shares
+# agglutinative morphology, noun-class prefixes, and open CV syllable structure.
+# Afrikaans is the other South African option in Whisper's inventory and is the
+# tempting one geographically, but it is West Germanic -- a Dutch daughter
+# language -- and shares little with Zulu beyond a Latin alphabet and a country.
+# Language family should beat geography here, though this is still a hypothesis:
+# `af` remains the A/B alternative, and there is an argument that Whisper's
+# Afrikaans data is closer in channel and code-switching profile. See
+# .claude/TODO.md.
+#
+# Whichever is chosen, it must stay fixed across a train/eval pair: the language
+# token is baked into every cached label, and the processed cache is keyed by it
+# (data/zulu/processed_whisper-small-zu_..._sw-transcribe/), so changing it
+# builds a separate cache rather than silently reusing the wrong one.
+language: sw
+
+# `transcribe` (same-language output), not `translate` (which would target
+# English).
+task: transcribe
+
+# Whisper's pretrained config suppresses tokens improbable in its pretraining
+# languages. Left at the default for now; `[]` clears the suppression lists and
+# is worth trying if Zulu orthography turns out to be penalized -- Zulu uses a
+# plain Latin alphabet, so this is less likely to bite than it would for a
+# language with unusual diacritics.
+suppress_tokens: null

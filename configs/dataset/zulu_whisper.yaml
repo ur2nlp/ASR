@@ -1,0 +1,27 @@
+# Zulu corpus, with the one dataset-level setting Whisper needs.
+#
+# Identical to dataset/zulu.yaml except for `max_label_length`. It exists as a
+# separate config only because that setting lives in the `dataset` namespace and
+# a training config cannot reach into it -- see the note below.
+#
+#     python -m src dataset=zulu_whisper model=whisper-small-zulu training=zulu_whisper
+
+defaults:
+  - zulu
+
+# Drop utterances whose encoded transcript exceeds Whisper's 448-token decoder
+# limit. Whisper errors on an over-long target rather than truncating, so this
+# is a guard, not a tuning knob -- on the measured corpus nothing comes close
+# (max 123 tokens, p95 91), but a single pathological segment would otherwise
+# kill a run partway through.
+max_label_length: 448
+
+# `id` is deliberately NOT overridden. Processed caches are keyed per
+# configuration, so the Whisper and XLS-R runs get their own subcaches
+# (processed_whisper_small_zu_... and processed_xlsr300m_...) while sharing this
+# dataset's untokenized text and dev split. Changing `id` here would duplicate
+# stage 1 on disk and split the output directory for no benefit.
+#
+# NOTE: max_label_length is a property of the *model* (Whisper's decoder has 448
+# positions), not of the Zulu corpus, so needing a dataset config to express it
+# is a wart. Tracked in .claude/TODO.md.
