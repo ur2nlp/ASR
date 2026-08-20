@@ -1,24 +1,38 @@
-"""Dataset dispatcher, preparation, and CTC data collator.
+"""Dataset dispatcher and two-stage preparation pipeline.
 
 Provides a type-dispatching loader (paired, audiofolder, huggingface, concat)
 that produces standardized {audio, transcription} datasets, a two-stage
 preparation pipeline (text normalization → feature extraction + label
-encoding), runtime loading of external held-out eval sets, and a data collator
-that handles the different padding semantics of CTC inputs vs labels.
+encoding), and runtime loading of external held-out eval sets.
+
+The data collators live in `src/collators.py`; they are re-exported here for
+callers that imported them from this module.
 """
 
 import glob
 import os
 import sys
-from dataclasses import dataclass
 
-import torch
 from datasets import Audio, Dataset, DatasetDict, concatenate_datasets, load_dataset
 from omegaconf import DictConfig
 from transformers import ProcessorMixin
 
+from src.collators import (
+    DataCollatorCTCWithPadding,
+    DataCollatorSpeechSeq2SeqWithPadding,
+)
 from src.preprocessing import build_text_normalizer
 from src.processors import get_model_spec
+
+__all__ = [
+    "DataCollatorCTCWithPadding",
+    "DataCollatorSpeechSeq2SeqWithPadding",
+    "ensure_train_dev_split",
+    "load_dataset_from_config",
+    "load_external_eval_sets",
+    "normalize_dataset",
+    "prepare_dataset_for_training",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -317,14 +331,17 @@ def prepare_dataset_for_training(
     model_type: str,
     sampling_rate: int = 16000,
     max_audio_length_seconds: float | None = None,
+    max_label_length: int | None = None,
     cache_dir: str | None = None,
 ) -> DatasetDict:
     """Stage 2: Feature extraction + label encoding.
 
     Pre-extracts and caches features so they are not recomputed each epoch.
-    This assumes the CNN feature extractor is frozen — an unfrozen extractor
-    would produce stale features after the first weight update. The entry point
-    enforces this constraint at startup.
+    For models whose front end learns from raw audio (wav2vec2, HuBERT,
+    W2V-BERT) this assumes that front end is frozen — otherwise the cached
+    features go stale after the first weight update, and the entry point
+    enforces the constraint at startup. Models with a deterministic front end
+    (Whisper's mel spectrogram) are unaffected.
 
     Args:
         dataset: Normalized DatasetDict with {audio, transcription} columns.
@@ -332,6 +349,9 @@ def prepare_dataset_for_training(
         model_type: Model type key for looking up input_column.
         sampling_rate: Target audio sampling rate.
         max_audio_length_seconds: Filter out audio longer than this.
+        max_label_length: Filter out examples whose encoded labels exceed this
+            many tokens. Needed for seq2seq decoders with a hard positional
+            limit (Whisper: 448).
         cache_dir: If provided, cache processed dataset to this path.
 
     Returns:
@@ -352,11 +372,16 @@ def prepare_dataset_for_training(
             max_audio_length_seconds=max_audio_length_seconds,
             split_name=split_name,
         )
-        dataset[split_name] = _feature_extract_and_encode(
+        split = _feature_extract_and_encode(
             split,
             processor=processor,
             input_column=input_column,
             sampling_rate=sampling_rate,
+        )
+        dataset[split_name] = _filter_long_labels(
+            split,
+            max_label_length=max_label_length,
+            split_name=split_name,
         )
 
     if processed_path:
@@ -412,14 +437,18 @@ def _feature_extract_and_encode(
         )
         example[input_column] = inputs[input_column][0]
 
-        # record length for length-grouped batching (group_by_length); works for
-        # both 1D input_values (samples) and 2D input_features (frames)
-        example["input_length"] = len(example[input_column])
+        # record length for length-grouped batching (group_by_length). This is
+        # measured on the raw audio rather than the extracted features so it
+        # stays meaningful across architectures: feature length is proportional
+        # to it for wav2vec2/W2V-BERT, and constant for models that pad to a
+        # fixed window (Whisper), where the feature length would sort nothing.
+        example["input_length"] = len(audio_array)
 
         # encode labels
         example["labels"] = processor.tokenizer(
             example["transcription"],
         ).input_ids
+        example["label_length"] = len(example["labels"])
 
         return example
 
@@ -429,6 +458,35 @@ def _feature_extract_and_encode(
     )
 
 
+def _filter_long_labels(
+    dataset: Dataset,
+    max_label_length: int | None,
+    split_name: str = "",
+) -> Dataset:
+    """Drop examples whose encoded labels exceed the decoder's position limit.
+
+    Seq2seq decoders have a hard maximum target length (448 for Whisper), and
+    an over-long label raises an index error deep in the forward pass rather
+    than a readable message, so we filter up front.
+    """
+    if max_label_length is None:
+        return dataset
+
+    before = len(dataset)
+    dataset = dataset.filter(
+        lambda example: example["label_length"] <= max_label_length
+    )
+    after = len(dataset)
+    if before != after:
+        label = f"{split_name}: " if split_name else ""
+        print(
+            f"Filtered {label}{before} → {after} "
+            f"(removed {before - after} examples with > {max_label_length} label tokens)",
+            file=sys.stderr,
+        )
+    return dataset
+
+
 def load_external_eval_sets(
     external_eval_sets: list,
     preprocessing_config: DictConfig,
@@ -436,6 +494,7 @@ def load_external_eval_sets(
     model_type: str,
     sampling_rate: int = 16000,
     max_audio_length_seconds: float | None = None,
+    max_label_length: int | None = None,
 ) -> dict[str, Dataset]:
     """Load extra held-out evaluation sets for monitoring during training.
 
@@ -457,6 +516,7 @@ def load_external_eval_sets(
         model_type: Model type key, for the input-column lookup.
         sampling_rate: Target audio sampling rate.
         max_audio_length_seconds: Optional filter for over-long clips.
+        max_label_length: Optional filter for over-long encoded transcripts.
 
     Returns:
         Mapping from eval-set name to its processed Dataset.
@@ -504,6 +564,11 @@ def load_external_eval_sets(
             input_column=input_column,
             sampling_rate=sampling_rate,
         )
+        dataset = _filter_long_labels(
+            dataset,
+            max_label_length=max_label_length,
+            split_name=name,
+        )
 
         eval_sets[name] = dataset
         print(
@@ -512,61 +577,3 @@ def load_external_eval_sets(
         )
 
     return eval_sets
-
-
-# ---------------------------------------------------------------------------
-# Data collator
-# ---------------------------------------------------------------------------
-
-@dataclass
-class DataCollatorCTCWithPadding:
-    """Pad CTC inputs and labels with appropriate padding semantics.
-
-    Inputs are padded with the feature extractor's padding value; labels are
-    padded with -100 (ignored by CTC loss).
-
-    Attributes:
-        processor: The combined processor for padding.
-        input_column: The name of the input feature column.
-        padding: Padding strategy passed to the processor.
-    """
-
-    processor: ProcessorMixin
-    input_column: str = "input_values"
-    padding: bool | str = True
-
-    def __call__(
-        self,
-        features: list[dict[str, list[int] | torch.Tensor]],
-    ) -> dict[str, torch.Tensor]:
-        # separate inputs and labels (different padding semantics)
-        input_features = [
-            {self.input_column: feature[self.input_column]} for feature in features
-        ]
-        # tokenizer.pad() expects dicts with key "input_ids", so we rename
-        # from "labels" here and rename back after padding
-        label_features = [
-            {"input_ids": feature["labels"]} for feature in features
-        ]
-
-        # pad inputs
-        batch = self.processor.feature_extractor.pad(
-            input_features,
-            padding=self.padding,
-            return_tensors="pt",
-        )
-
-        # pad labels
-        labels_batch = self.processor.tokenizer.pad(
-            label_features,
-            padding=self.padding,
-            return_tensors="pt",
-        )
-
-        # replace padding tokens in labels with -100
-        labels = labels_batch["input_ids"].masked_fill(
-            labels_batch.attention_mask.ne(1), -100
-        )
-        batch["labels"] = labels
-
-        return batch

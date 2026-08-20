@@ -11,7 +11,6 @@ import sys
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from transformers import Trainer, TrainingArguments
 from transformers.trainer_utils import get_last_checkpoint
 
 from src.artifact_configs import DatasetConfig, ProcessedDatasetConfig
@@ -21,7 +20,6 @@ from src.callbacks import (
     UnfreezeCallback,
 )
 from src.data import (
-    DataCollatorCTCWithPadding,
     ensure_train_dev_split,
     load_dataset_from_config,
     load_external_eval_sets,
@@ -30,8 +28,7 @@ from src.data import (
 )
 from src.metrics import make_compute_metrics, preprocess_logits_for_metrics
 from src.models import setup_model
-from src.processors import get_model_spec, setup_processor
-from src.vocab import create_ctc_tokenizer, generate_vocab, save_vocab
+from src.processors import ModelSpec, get_model_spec, setup_processor, setup_tokenizer
 
 
 OmegaConf.register_new_resolver("divide", lambda x, y: int(x / y), replace=True)
@@ -78,13 +75,18 @@ def _handle_cache_cleanup(args: DictConfig, cache_dir: str, output_dir: str) -> 
 
 def _build_training_arguments(
     args: DictConfig,
+    spec: ModelSpec,
     output_dir: str,
     metric_for_best_model: str | None = None,
-) -> TrainingArguments:
+):
     """Construct TrainingArguments from config.
+
+    The class is taken from the ModelSpec so that generation-based evaluation
+    gets a ``Seq2SeqTrainingArguments`` carrying the extra generation knobs.
 
     Args:
         args: Full Hydra config.
+        spec: The ModelSpec for the configured architecture.
         output_dir: Directory for checkpoints and the best model.
         metric_for_best_model: Overrides ``training.metric_for_best_model`` when
             given. Used when external eval sets turn ``eval_dataset`` into a dict,
@@ -94,7 +96,18 @@ def _build_training_arguments(
     training = args.training
     if metric_for_best_model is None:
         metric_for_best_model = training.metric_for_best_model
-    return TrainingArguments(
+
+    extra_kwargs = {}
+    if spec.uses_generation:
+        # evaluation must decode autoregressively rather than score logits,
+        # otherwise WER would be computed over teacher-forced predictions
+        extra_kwargs["predict_with_generate"] = True
+        extra_kwargs["generation_max_length"] = training.get(
+            "generation_max_length", 225
+        )
+        extra_kwargs["generation_num_beams"] = training.get("generation_num_beams", 1)
+
+    return spec.training_arguments_class(
         output_dir=output_dir,
         num_train_epochs=training.num_train_epochs,
         per_device_train_batch_size=training.per_device_train_batch_size,
@@ -125,7 +138,24 @@ def _build_training_arguments(
         seed=args.seed,
         report_to="none",
         remove_unused_columns=False,
+        **extra_kwargs,
     )
+
+
+def _build_data_collator(spec: ModelSpec, processor, model):
+    """Instantiate the architecture's data collator.
+
+    Seq2seq collators additionally need the model's decoder start token so they
+    can strip it from the labels; the CTC collator has no such argument.
+    """
+    collator_kwargs = {
+        "processor": processor,
+        "input_column": spec.input_column,
+    }
+    if spec.objective == "seq2seq":
+        collator_kwargs["decoder_start_token_id"] = model.config.decoder_start_token_id
+
+    return spec.collator_class(**collator_kwargs)
 
 
 def _build_callbacks(args: DictConfig) -> list:
@@ -201,6 +231,7 @@ def _add_external_eval_sets(
         model_type=args.model.type,
         sampling_rate=args.audio.sampling_rate,
         max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
+        max_label_length=args.dataset.get("max_label_length"),
     )
     for name, dataset in extra_sets.items():
         if name in eval_dict:
@@ -220,18 +251,48 @@ def _add_external_eval_sets(
     return eval_dict, metric_for_best_model
 
 
+def _validate_config(args: DictConfig, spec: ModelSpec) -> None:
+    """Reject config combinations that the architecture cannot honour.
+
+    Checks that would otherwise surface as a confusing runtime failure many
+    minutes into a run, or worse, as a silently wrong result.
+    """
+    # Pre-extracted features go stale if a *learned* front end keeps training.
+    # Whisper's front end is a deterministic mel spectrogram, so unfreezing its
+    # conv stack is safe and does not trip this.
+    if spec.learned_feature_extractor:
+        if not args.training.get("freeze_feature_extractor", True):
+            raise ValueError(
+                f"freeze_feature_extractor=false is not supported for model type "
+                f"'{args.model.type}'. Feature extraction is pre-computed and cached "
+                f"before training, so an unfrozen feature extractor would train on "
+                f"stale features. Full end-to-end fine-tuning is not yet implemented "
+                f"in this framework."
+            )
+
+    if args.lm.get("enabled", False) and not spec.supports_lm_decoding:
+        raise ValueError(
+            f"lm.enabled=true is not supported for model type '{args.model.type}'. "
+            f"KenLM shallow fusion via pyctcdecode operates on per-frame CTC logits "
+            f"and has no equivalent for an autoregressive decoder. Set lm.enabled=false."
+        )
+
+    if args.training.get("group_by_length", False) and spec.fixed_length_features:
+        print(
+            f"Warning: group_by_length=true has no effect for model type "
+            f"'{args.model.type}', whose inputs are all padded to a fixed length. "
+            f"Set it to false to skip the sampler's bookkeeping.",
+            file=sys.stderr,
+        )
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="main")
 def main(args: DictConfig) -> None:
     """Main training entry point."""
     print(f"Config:\n{OmegaConf.to_yaml(args)}", file=sys.stderr)
 
-    if not args.training.get("freeze_feature_extractor", True):
-        raise ValueError(
-            "freeze_feature_extractor=false is not supported. "
-            "Feature extraction is pre-computed and cached before training, "
-            "so an unfrozen feature extractor would train on stale features. "
-            "Full end-to-end fine-tuning is not yet implemented in this framework."
-        )
+    spec = get_model_spec(args.model.type)
+    _validate_config(args, spec)
 
     cache_dir = args.dataset.cache_dir
     output_dir = _build_output_dir(args)
@@ -251,16 +312,15 @@ def main(args: DictConfig) -> None:
     dataset_config.save(dataset_config_path)
     print(f"Dataset splits: {dict(dataset.num_rows)}", file=sys.stderr)
 
-    # --- Stage 2: Generate vocab and build processor ---
+    # --- Stage 2: Build tokenizer and processor ---
+    # CTC models generate a character vocab from the training transcripts;
+    # seq2seq models reuse the checkpoint's own subword tokenizer.
     vocab_dir = os.path.join(cache_dir, "vocab")
-    vocab_path = os.path.join(vocab_dir, "vocab.json")
-
-    if not os.path.exists(vocab_path):
-        train_texts = dataset["train"]["transcription"]
-        vocab = generate_vocab(train_texts)
-        save_vocab(vocab, vocab_path)
-
-    tokenizer = create_ctc_tokenizer(vocab_path)
+    tokenizer = setup_tokenizer(
+        args,
+        train_texts=dataset["train"]["transcription"],
+        vocab_dir=vocab_dir,
+    )
     processor = setup_processor(args, tokenizer)
     vocab_size = len(tokenizer)
 
@@ -269,13 +329,13 @@ def main(args: DictConfig) -> None:
     processed_config_path = os.path.join(cache_dir, "processed_config.yaml")
     processed_config.check_cached(processed_config_path)
 
-    spec = get_model_spec(args.model.type)
     dataset = prepare_dataset_for_training(
         dataset,
         processor,
         model_type=args.model.type,
         sampling_rate=args.audio.sampling_rate,
         max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
+        max_label_length=args.dataset.get("max_label_length"),
         cache_dir=cache_dir,
     )
 
@@ -286,12 +346,13 @@ def main(args: DictConfig) -> None:
 
     # --- Stage 5: Train ---
     callbacks = _build_callbacks(args)
-    compute_metrics = make_compute_metrics(processor)
-
-    data_collator = DataCollatorCTCWithPadding(
-        processor=processor,
-        input_column=spec.input_column,
+    compute_metrics = make_compute_metrics(
+        processor,
+        prediction_decode_kwargs=spec.prediction_decode_kwargs,
+        label_decode_kwargs=spec.label_decode_kwargs,
     )
+
+    data_collator = _build_data_collator(spec, processor, model)
 
     # determine eval dataset (prefer dev, fall back to test)
     eval_split = "dev" if "dev" in dataset else "test" if "test" in dataset else None
@@ -311,18 +372,24 @@ def main(args: DictConfig) -> None:
         )
 
     training_args = _build_training_arguments(
-        args, output_dir, metric_for_best_model=metric_for_best_model
+        args, spec, output_dir, metric_for_best_model=metric_for_best_model
     )
 
-    trainer = Trainer(
+    trainer_kwargs = {}
+    if not spec.uses_generation:
+        # under predict_with_generate the Trainer already returns token IDs,
+        # so there are no logits left to reduce
+        trainer_kwargs["preprocess_logits_for_metrics"] = preprocess_logits_for_metrics
+
+    trainer = spec.trainer_class(
         model=model,
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         callbacks=callbacks,
+        **trainer_kwargs,
     )
 
     # save full config

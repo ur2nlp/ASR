@@ -245,11 +245,14 @@ class TestLoadExternalEvalSets:
             "input_values",
             "labels",
             "input_length",
+            "label_length",
         }
         assert len(result["clean"]) == 1
-        # input_length must match the feature length for group_by_length batching
+        # input_length is measured on the raw audio for group_by_length batching;
+        # for wav2vec2 that equals the feature length one-for-one
         example = result["clean"][0]
         assert example["input_length"] == len(example["input_values"])
+        assert example["label_length"] == len(example["labels"])
 
     def test_normalizes_transcriptions(
         self, tmp_dir, preprocessing_config, wav2vec2_processor

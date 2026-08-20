@@ -19,6 +19,24 @@ from tqdm import tqdm
 from transformers import AutoModelForCTC, AutoProcessor
 
 
+def _require_ctc_checkpoint(model_dir: str) -> None:
+    """Fail fast on a seq2seq checkpoint rather than mis-decoding it.
+
+    This tool decodes by argmax over per-frame logits, which is meaningless for
+    an autoregressive decoder. Use `tools/eval.py`, which dispatches on the
+    checkpoint's objective, until batch generation lands here too.
+    """
+    from src.processors import get_spec_for_checkpoint
+
+    model_type, spec = get_spec_for_checkpoint(model_dir)
+    if spec.objective != "ctc":
+        raise ValueError(
+            f"{__file__} supports CTC checkpoints only, but {model_dir} is a "
+            f"'{model_type}' model with a '{spec.objective}' objective. "
+            f"Use `python -m tools.eval` for WER/CER on this checkpoint."
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Batch decode audio files")
     parser.add_argument("--model_dir", required=True, help="Path to model checkpoint")
@@ -34,6 +52,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    _require_ctc_checkpoint(args.model_dir)
 
     processor = AutoProcessor.from_pretrained(args.model_dir)
     model = AutoModelForCTC.from_pretrained(args.model_dir)

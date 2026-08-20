@@ -4,6 +4,10 @@ import json
 import os
 import tempfile
 
+# numpy must be imported before torch: on macOS the two ship separate copies of
+# libomp, and initializing torch's first aborts the interpreter. Importing it
+# here means any test module can be run on its own, in any import order.
+import numpy  # noqa: F401
 import pytest
 from omegaconf import OmegaConf
 

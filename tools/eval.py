@@ -1,13 +1,20 @@
 """Standalone WER/CER evaluation.
 
 Loads a trained model and processor, runs inference on a test set, and
-reports WER/CER. Supports optional LM decoding.
+reports WER/CER. The architecture is recovered from the checkpoint's own
+config, so CTC and seq2seq models are both handled: CTC models are decoded by
+argmax (optionally with KenLM shallow fusion), seq2seq models autoregressively.
 
 Usage:
     python -m tools.eval \
-        --model_dir models/zulu/w2v300m_default/best-checkpoint \
+        --model_dir models/zulu/xlsr300m_l40_basic/best-checkpoint \
         --test_data data/zulu/test \
         --lm_arpa path/to/lm.arpa
+
+    python -m tools.eval \
+        --model_dir models/zulu/whisper_small_whisper_basic/best-checkpoint \
+        --test_data data/zulu/test \
+        --num_beams 5
 """
 
 import argparse
@@ -18,7 +25,9 @@ import evaluate
 import torch
 from datasets import load_from_disk
 from tqdm import tqdm
-from transformers import AutoModelForCTC, AutoProcessor
+from transformers import AutoProcessor
+
+from src.processors import get_spec_for_checkpoint
 
 
 def parse_args():
@@ -26,10 +35,22 @@ def parse_args():
     parser.add_argument("--model_dir", required=True, help="Path to model checkpoint")
     parser.add_argument("--test_data", required=True, help="Path to test dataset on disk")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--lm_arpa", default=None, help="Path to KenLM ARPA file")
+    parser.add_argument("--lm_arpa", default=None, help="Path to KenLM ARPA file (CTC only)")
     parser.add_argument("--lm_alpha", type=float, default=0.5)
     parser.add_argument("--lm_beta", type=float, default=1.5)
     parser.add_argument("--beam_width", type=int, default=100)
+    parser.add_argument(
+        "--num_beams",
+        type=int,
+        default=1,
+        help="Beam size for autoregressive decoding (seq2seq only)",
+    )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=225,
+        help="Generation length cap (seq2seq only)",
+    )
     parser.add_argument("--output", default=None, help="Path to write results JSON")
     return parser.parse_args()
 
@@ -37,8 +58,21 @@ def parse_args():
 def main():
     args = parse_args()
 
+    model_type, spec = get_spec_for_checkpoint(args.model_dir)
+    print(
+        f"Checkpoint architecture: {model_type} (objective={spec.objective})",
+        file=sys.stderr,
+    )
+
+    if args.lm_arpa and not spec.supports_lm_decoding:
+        raise ValueError(
+            f"--lm_arpa is not supported for model type '{model_type}'. KenLM "
+            f"shallow fusion via pyctcdecode operates on per-frame CTC logits and "
+            f"has no equivalent for an autoregressive decoder."
+        )
+
     processor = AutoProcessor.from_pretrained(args.model_dir)
-    model = AutoModelForCTC.from_pretrained(args.model_dir)
+    model = spec.model_class.from_pretrained(args.model_dir)
     model.eval()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -47,7 +81,7 @@ def main():
     dataset = load_from_disk(args.test_data)
 
     # optionally set up LM decoding
-    decode_with_lm = False
+    processor_with_lm = None
     if args.lm_arpa:
         from src.decoding import build_processor_with_lm
         processor_with_lm = build_processor_with_lm(
@@ -57,7 +91,6 @@ def main():
             beta=args.lm_beta,
             beam_width=args.beam_width,
         )
-        decode_with_lm = True
 
     wer_metric = evaluate.load("wer")
     cer_metric = evaluate.load("cer")
@@ -65,43 +98,45 @@ def main():
     all_preds = []
     all_refs = []
 
-    # detect input column
-    if "input_features" in dataset.column_names:
-        input_col = "input_features"
-    else:
-        input_col = "input_values"
-
-    for i in tqdm(range(0, len(dataset), args.batch_size), desc="Evaluating"):
-        batch = dataset[i:i + args.batch_size]
-
-        inputs = processor.feature_extractor(
-            batch[input_col],
-            sampling_rate=16000,
-            return_tensors="pt",
-            padding=True,
+    input_column = spec.input_column
+    if input_column not in dataset.column_names:
+        raise ValueError(
+            f"Test dataset has no '{input_column}' column (found: "
+            f"{dataset.column_names}). It was prepared for a different "
+            f"architecture than this checkpoint's."
         )
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    for start in tqdm(range(0, len(dataset), args.batch_size), desc="Evaluating"):
+        batch = dataset[start:start + args.batch_size]
+
+        # the dataset already holds extracted features, so pad them into a
+        # batch rather than re-running feature extraction over them
+        inputs = processor.feature_extractor.pad(
+            [{input_column: features} for features in batch[input_column]],
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = {key: value.to(device) for key, value in inputs.items()}
 
         with torch.no_grad():
-            logits = model(**inputs).logits
-
-        if decode_with_lm:
-            from src.decoding import decode_logits
-            preds = decode_logits(
-                logits.cpu().numpy(),
-                processor_with_lm,
-                beam_width=args.beam_width,
+            preds = _decode_batch(
+                model=model,
+                spec=spec,
+                processor=processor,
+                processor_with_lm=processor_with_lm,
+                inputs=inputs,
+                args=args,
             )
-        else:
-            pred_ids = logits.argmax(dim=-1)
-            preds = processor.tokenizer.batch_decode(pred_ids, group_tokens=True)
 
         # get reference labels
-        label_ids = batch["labels"]
-        for label_seq in label_ids:
-            filtered = [lid for lid in label_seq if lid != -100]
-            ref = processor.tokenizer.decode(filtered, group_tokens=False)
-            all_refs.append(ref)
+        for label_seq in batch["labels"]:
+            filtered = [
+                label_id for label_id in label_seq if label_id != -100
+            ]
+            reference = processor.tokenizer.decode(
+                filtered, **spec.label_decode_kwargs
+            )
+            all_refs.append(reference)
 
         all_preds.extend(preds)
 
@@ -121,6 +156,7 @@ def main():
         "cer": cer,
         "num_examples": len(pairs),
         "model_dir": args.model_dir,
+        "model_type": model_type,
         "lm_arpa": args.lm_arpa,
     }
 
@@ -132,6 +168,34 @@ def main():
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2)
         print(f"Results saved to {args.output}", file=sys.stderr)
+
+
+def _decode_batch(model, spec, processor, processor_with_lm, inputs, args) -> list[str]:
+    """Decode one batch into transcript strings, per the spec's objective."""
+    if spec.uses_generation:
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=args.max_new_tokens,
+            num_beams=args.num_beams,
+        )
+        return processor.tokenizer.batch_decode(
+            generated_ids, **spec.prediction_decode_kwargs
+        )
+
+    logits = model(**inputs).logits
+
+    if processor_with_lm is not None:
+        from src.decoding import decode_logits
+        return decode_logits(
+            logits.cpu().numpy(),
+            processor_with_lm,
+            beam_width=args.beam_width,
+        )
+
+    pred_ids = logits.argmax(dim=-1)
+    return processor.tokenizer.batch_decode(
+        pred_ids, **spec.prediction_decode_kwargs
+    )
 
 
 if __name__ == "__main__":

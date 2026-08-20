@@ -1,0 +1,35 @@
+# Whisper small (244M): encoder-decoder, seq2seq objective.
+#
+# Unlike the CTC models, Whisper does NOT build a character vocabulary from
+# your training data. Its decoder embeddings are tied to a pretrained
+# multilingual BPE vocabulary, so the `vocab/` cache stage is skipped entirely
+# and the checkpoint's own tokenizer is used.
+#
+# Its feature extractor is likewise loaded from the checkpoint rather than
+# built from the `audio` config section: the mel filterbank parameters (80 mel
+# bins here, 128 for large-v3) must match what the encoder was trained on.
+# `audio.sampling_rate` is still honoured for resampling and must stay 16000.
+
+type: whisper
+pretrained_name: openai/whisper-small
+short_name: whisper_small
+
+# Language token prefixed to every transcript. Whisper only has tokens for the
+# 100 languages it was pretrained on -- if yours is not among them, name a
+# close proxy whose token you are willing to repurpose (fine-tuning re-maps
+# it). An unsupported code fails fast at startup with the list of valid ones.
+#
+# This is deliberately left unset so a fork must make the choice: leaving it
+# null is NOT a neutral default and errors at startup. The tokenizer would drop
+# the language token from training labels while generate() detects and inserts
+# one anyway, training and evaluating the decoder on different prefixes. Set
+# `detect` to accept that trade deliberately (it warns loudly at startup).
+language: null
+
+# `transcribe` (same-language output) or `translate` (output English).
+task: transcribe
+
+# Whisper's pretrained config suppresses tokens that are improbable in its
+# pretraining languages, which can wrongly block characters in an adapted
+# language. Set to [] to clear the suppression lists; null keeps the defaults.
+suppress_tokens: null
