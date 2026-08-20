@@ -5,12 +5,16 @@ import os
 import pytest
 import yaml
 
+from omegaconf import OmegaConf
+
 from src.artifact_configs import (
     ArtifactConfig,
     DatasetConfig,
     ModelConfig,
     ProcessedDatasetConfig,
     _dict_diff,
+    processed_cache_dirname,
+    warn_on_legacy_processed_cache,
 )
 
 
@@ -142,3 +146,86 @@ class TestModelConfig:
         d = config.to_dict()
         assert d["model_type"] == "wav2vec2"
         assert "training_config" in d
+
+
+class TestProcessedCacheDirname:
+    """Per-configuration processed subcache naming.
+
+    The name must distinguish every configuration that produces different
+    cached features or labels, so that caches for different models coexist
+    under one dataset instead of invalidating each other.
+    """
+
+    @staticmethod
+    def _args(model: dict, dataset: dict = None, sampling_rate: int = 16000):
+        return OmegaConf.create(
+            {
+                "model": model,
+                "audio": {"sampling_rate": sampling_rate},
+                "dataset": dataset or {},
+            }
+        )
+
+    def test_ctc_model_name(self):
+        args = self._args(
+            {"type": "wav2vec2", "short_name": "xlsr300m"},
+            {"max_audio_length_seconds": 30.0},
+        )
+        assert processed_cache_dirname(args) == "processed_xlsr300m_sr16k_a30"
+
+    def test_whisper_name_includes_label_limit_and_language(self):
+        args = self._args(
+            {
+                "type": "whisper",
+                "short_name": "whisper_small",
+                "language": "af",
+                "task": "transcribe",
+            },
+            {"max_audio_length_seconds": 30.0, "max_label_length": 448},
+        )
+        assert processed_cache_dirname(args) == (
+            "processed_whisper-small_sr16k_a30_l448_af-transcribe"
+        )
+
+    def test_different_models_get_different_caches(self):
+        dataset = {"max_audio_length_seconds": 30.0}
+        ctc = processed_cache_dirname(
+            self._args({"type": "wav2vec2", "short_name": "xlsr300m"}, dataset)
+        )
+        whisper = processed_cache_dirname(
+            self._args(
+                {"type": "whisper", "short_name": "whisper_small", "language": "af"},
+                dataset,
+            )
+        )
+        assert ctc != whisper
+
+    def test_language_change_gets_a_different_cache(self):
+        """Whisper's language token changes every cached label."""
+        base = {"type": "whisper", "short_name": "whisper_small", "task": "transcribe"}
+        afrikaans = processed_cache_dirname(self._args({**base, "language": "af"}))
+        swahili = processed_cache_dirname(self._args({**base, "language": "sw"}))
+        assert afrikaans != swahili
+
+    def test_omits_unset_optional_fields(self):
+        args = self._args({"type": "wav2vec2", "short_name": "xlsr300m"})
+        assert processed_cache_dirname(args) == "processed_xlsr300m_sr16k"
+
+    def test_falls_back_to_model_type_without_short_name(self):
+        args = self._args({"type": "hubert"})
+        assert processed_cache_dirname(args) == "processed_hubert_sr16k"
+
+    def test_name_is_filesystem_safe(self):
+        args = self._args({"type": "whisper", "short_name": "openai/whisper-small"})
+        assert "/" not in processed_cache_dirname(args)
+
+
+class TestLegacyProcessedCacheWarning:
+    def test_warns_when_old_layout_present(self, tmp_path, capsys):
+        os.makedirs(tmp_path / "processed")
+        warn_on_legacy_processed_cache(str(tmp_path))
+        assert "old layout" in capsys.readouterr().err
+
+    def test_silent_when_absent(self, tmp_path, capsys):
+        warn_on_legacy_processed_cache(str(tmp_path))
+        assert capsys.readouterr().err == ""

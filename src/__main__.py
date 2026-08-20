@@ -13,7 +13,12 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from transformers.trainer_utils import get_last_checkpoint
 
-from src.artifact_configs import DatasetConfig, ProcessedDatasetConfig
+from src.artifact_configs import (
+    DatasetConfig,
+    ProcessedDatasetConfig,
+    processed_cache_dirname,
+    warn_on_legacy_processed_cache,
+)
 from src.callbacks import (
     DelayedEarlyStoppingCallback,
     DetectBrokenLossCallback,
@@ -54,15 +59,25 @@ def _build_output_dir(args: DictConfig) -> str:
     return base_path
 
 
-def _handle_cache_cleanup(args: DictConfig, cache_dir: str, output_dir: str) -> None:
-    """Conditionally clear cached artifacts based on fresh_* flags."""
+def _handle_cache_cleanup(
+    args: DictConfig,
+    cache_dir: str,
+    output_dir: str,
+    processed_path: str,
+) -> None:
+    """Conditionally clear cached artifacts based on fresh_* flags.
+
+    `fresh_processed` clears only this run's own processed subcache, leaving
+    other models' subcaches for the same dataset intact — rebuilding a Whisper
+    cache should not throw away the wav2vec2 one beside it. `fresh_dataset`
+    still clears everything, subcaches included.
+    """
     if args.get("fresh_model", False):
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
             print(f"Cleared model output dir: {output_dir}", file=sys.stderr)
 
     if args.get("fresh_processed", False):
-        processed_path = os.path.join(cache_dir, "processed")
         if os.path.exists(processed_path):
             shutil.rmtree(processed_path)
             print(f"Cleared processed dataset cache: {processed_path}", file=sys.stderr)
@@ -297,8 +312,14 @@ def main(args: DictConfig) -> None:
     cache_dir = args.dataset.cache_dir
     output_dir = _build_output_dir(args)
 
+    # feature extraction and label encoding are model-specific, so each
+    # configuration caches into its own subdirectory beside the shared
+    # untokenized text rather than fighting over a single `processed/`
+    processed_path = os.path.join(cache_dir, processed_cache_dirname(args))
+
     # cache cleanup
-    _handle_cache_cleanup(args, cache_dir, output_dir)
+    _handle_cache_cleanup(args, cache_dir, output_dir, processed_path)
+    warn_on_legacy_processed_cache(cache_dir)
 
     # --- Stage 1: Load and normalize dataset ---
     dataset_config = DatasetConfig.from_args(args)
@@ -325,8 +346,10 @@ def main(args: DictConfig) -> None:
     vocab_size = len(tokenizer)
 
     # --- Stage 3: Process dataset (feature extraction + label encoding) ---
+    # the config lives inside the subcache it describes, so each cache is
+    # self-validating and they cannot invalidate one another
     processed_config = ProcessedDatasetConfig.from_args(args, vocab_size)
-    processed_config_path = os.path.join(cache_dir, "processed_config.yaml")
+    processed_config_path = os.path.join(processed_path, "config.yaml")
     processed_config.check_cached(processed_config_path)
 
     dataset = prepare_dataset_for_training(
@@ -336,7 +359,7 @@ def main(args: DictConfig) -> None:
         sampling_rate=args.audio.sampling_rate,
         max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
         max_label_length=args.dataset.get("max_label_length"),
-        cache_dir=cache_dir,
+        processed_path=processed_path,
     )
 
     processed_config.save(processed_config_path)

@@ -332,7 +332,7 @@ def prepare_dataset_for_training(
     sampling_rate: int = 16000,
     max_audio_length_seconds: float | None = None,
     max_label_length: int | None = None,
-    cache_dir: str | None = None,
+    processed_path: str | None = None,
 ) -> DatasetDict:
     """Stage 2: Feature extraction + label encoding.
 
@@ -352,12 +352,14 @@ def prepare_dataset_for_training(
         max_label_length: Filter out examples whose encoded labels exceed this
             many tokens. Needed for seq2seq decoders with a hard positional
             limit (Whisper: 448).
-        cache_dir: If provided, cache processed dataset to this path.
+        processed_path: If provided, the directory to cache the processed
+            dataset in. Callers pass a per-configuration subcache (see
+            `artifact_configs.processed_cache_dirname`) so that caches for
+            different models coexist instead of invalidating each other.
 
     Returns:
         DatasetDict ready for training with model-appropriate input columns.
     """
-    processed_path = os.path.join(cache_dir, "processed") if cache_dir else None
     if processed_path and os.path.exists(processed_path):
         print(f"Loading cached processed dataset from {processed_path}", file=sys.stderr)
         return DatasetDict.load_from_disk(processed_path)
