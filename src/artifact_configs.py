@@ -184,6 +184,98 @@ class ProcessedDatasetConfig(ArtifactConfig):
         return asdict(self)
 
 
+# ---------------------------------------------------------------------------
+# Processed-cache naming
+# ---------------------------------------------------------------------------
+
+def _format_sampling_rate(sampling_rate: int) -> str:
+    """Render a sampling rate compactly: 16000 -> '16k'."""
+    if sampling_rate % 1000 == 0:
+        return f"{sampling_rate // 1000}k"
+    return str(sampling_rate)
+
+
+def _format_seconds(seconds: float) -> str:
+    """Render a duration without a trailing '.0': 30.0 -> '30'."""
+    if float(seconds).is_integer():
+        return str(int(seconds))
+    return str(seconds).replace(".", "p")
+
+
+def _slugify(value: str) -> str:
+    """Reduce an arbitrary config string to a filesystem-safe token."""
+    safe = [character if character.isalnum() else "-" for character in str(value)]
+    return "".join(safe).strip("-").lower()
+
+
+def processed_cache_dirname(args: DictConfig) -> str:
+    """Name the processed-dataset subcache for this run's configuration.
+
+    Feature extraction and label encoding are model-specific -- a wav2vec2 cache
+    holds raw-waveform `input_values` and character labels, a Whisper cache holds
+    mel `input_features` and subword labels -- so they cannot share a directory.
+    Rather than one `processed/` that every run invalidates in turn, each
+    configuration gets its own sibling subcache and they coexist:
+
+        data/zulu/untokenized/                            (text, model-agnostic)
+        data/zulu/vocab/                                  (CTC char vocab)
+        data/zulu/processed_xlsr300m_sr16k_a30/
+        data/zulu/processed_whisper_small_sr16k_a30_l448_af-transcribe/
+
+    The name carries only the fields derivable from `args`, so it can be
+    computed before the dataset is loaded (the `fresh_processed` cleanup needs
+    it). It is a readable key, not a complete fingerprint: the full tracked set,
+    including the vocab size that is only known after stage 1, lives in the
+    `config.yaml` written inside the subcache, and `ProcessedDatasetConfig`
+    still errors on a mismatch within a directory.
+
+    Args:
+        args: Full Hydra config (needs args.model, args.audio, args.dataset).
+
+    Returns:
+        Directory name such as `processed_whisper_small_sr16k_a30_l448_af-transcribe`.
+    """
+    model_short = args.model.get("short_name") or args.model.type
+    parts = [_slugify(model_short), f"sr{_format_sampling_rate(args.audio.sampling_rate)}"]
+
+    max_audio_length = args.dataset.get("max_audio_length_seconds")
+    if max_audio_length is not None:
+        parts.append(f"a{_format_seconds(max_audio_length)}")
+
+    max_label_length = args.dataset.get("max_label_length")
+    if max_label_length is not None:
+        parts.append(f"l{int(max_label_length)}")
+
+    # Only multilingual seq2seq models prefix language/task tokens to their
+    # labels; for everything else these are absent and add nothing to the name.
+    language = args.model.get("language")
+    task = args.model.get("task")
+    if language is not None:
+        parts.append(f"{_slugify(language)}-{_slugify(task)}" if task else _slugify(language))
+
+    return "processed_" + "_".join(parts)
+
+
+def warn_on_legacy_processed_cache(cache_dir: str) -> None:
+    """Point out a pre-subcache `processed/` directory left by an older run.
+
+    Processed data used to live at a single `<cache_dir>/processed`. Those
+    directories are no longer read, so say so rather than let them sit taking up
+    disk with no explanation.
+    """
+    legacy_path = os.path.join(cache_dir, "processed")
+    if not os.path.isdir(legacy_path):
+        return
+
+    print(
+        f"Note: found a processed cache in the old layout at {legacy_path}.\n"
+        f"      Processed data now lives in per-configuration subcaches named\n"
+        f"      processed_<model>_<settings>, so this directory is no longer "
+        f"read and can be deleted.",
+        file=sys.stderr,
+    )
+
+
 @dataclass
 class ModelConfig(ArtifactConfig):
     """Tracks the full model + training configuration."""
