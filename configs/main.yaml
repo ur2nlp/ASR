@@ -3,6 +3,7 @@ defaults:
   - model: xls-r
   - training: l40_basic
   - dataset: ???
+  - focus: none
   - external_eval: none
 
 seed: 1

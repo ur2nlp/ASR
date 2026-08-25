@@ -19,6 +19,7 @@ from src.artifact_configs import (
     processed_cache_dirname,
     warn_on_legacy_processed_cache,
 )
+from src import focus
 from src.callbacks import (
     DelayedEarlyStoppingCallback,
     DetectBrokenLossCallback,
@@ -52,6 +53,11 @@ def _build_output_dir(args: DictConfig) -> str:
     model_short = args.model.get("short_name", args.model.type)
     training_name = args.training.name
     base_path = os.path.join(args.output_dir, language, f"{model_short}_{training_name}")
+
+    # A replaced vocabulary is a different experiment, not a rerun of the same
+    # one, so it must not land on the baseline's checkpoints.
+    if focus.is_enabled(args):
+        base_path = f"{base_path}_{focus.tokenizer_id(args)}"
 
     experiment_id = args.get("experiment_id")
     if experiment_id:
@@ -292,6 +298,17 @@ def _validate_config(args: DictConfig, spec: ModelSpec) -> None:
                 f"in this framework."
             )
 
+    # Fail before the dataset is loaded rather than at tokenizer setup, which is
+    # several minutes of audio decoding later.
+    if focus.is_enabled(args) and spec.tokenizer_source != "pretrained":
+        raise ValueError(
+            f"focus.enabled=true is not supported for model type "
+            f"'{args.model.type}'. FOCUS replaces a pretrained subword "
+            f"vocabulary with one learned from the target transcripts, but this "
+            f"architecture already builds its vocabulary from them "
+            f"(tokenizer_source='{spec.tokenizer_source}'). Set focus=none."
+        )
+
     if args.lm.get("enabled", False) and not spec.supports_lm_decoding:
         raise ValueError(
             f"lm.enabled=true is not supported for model type '{args.model.type}'. "
@@ -348,6 +365,7 @@ def main(args: DictConfig) -> None:
         args,
         train_texts=dataset["train"]["transcription"],
         vocab_dir=vocab_dir,
+        cache_dir=cache_dir,
     )
     processor = setup_processor(args, tokenizer)
     vocab_size = len(tokenizer)
@@ -372,7 +390,7 @@ def main(args: DictConfig) -> None:
     processed_config.save(processed_config_path)
 
     # --- Stage 4: Setup model ---
-    model = setup_model(args, processor)
+    model = setup_model(args, processor, cache_dir=cache_dir)
 
     # --- Stage 5: Train ---
     callbacks = _build_callbacks(args)

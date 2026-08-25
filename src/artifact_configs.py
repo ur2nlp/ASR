@@ -166,9 +166,15 @@ class ProcessedDatasetConfig(ArtifactConfig):
     # cached labels.
     language: str | None = None
     task: str | None = None
+    # Identifies the FOCUS tokenizer when vocabulary replacement is on. A
+    # different FOCUS vocabulary means entirely different cached labels, so it
+    # must not share a subcache with the pretrained-vocabulary run.
+    focus_tokenizer_id: str | None = None
 
     @classmethod
     def from_args(cls, args: DictConfig, vocab_size: int) -> "ProcessedDatasetConfig":
+        from src.focus import is_enabled as focus_is_enabled, tokenizer_id
+
         return cls(
             model_type=args.model.type,
             pretrained_name=args.model.pretrained_name,
@@ -178,6 +184,57 @@ class ProcessedDatasetConfig(ArtifactConfig):
             max_label_length=args.dataset.get("max_label_length"),
             language=args.model.get("language"),
             task=args.model.get("task"),
+            focus_tokenizer_id=tokenizer_id(args) if focus_is_enabled(args) else None,
+        )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# FOCUS vocabulary replacement
+# ---------------------------------------------------------------------------
+
+def format_number(value: int) -> str:
+    """Render a count compactly for a directory name: 4096 -> '4k'.
+
+    Truncating rather than rounding keeps the mapping deterministic, which
+    matters because the result is a cache-path component.
+    """
+    if value >= 1_000_000:
+        return f"{value // 1_000_000}m"
+    if value >= 1000:
+        return f"{value // 1000}k"
+    return str(value)
+
+
+@dataclass
+class FocusTokenizerConfig(ArtifactConfig):
+    """Tracks the settings that determine the FOCUS tokenizer artifact.
+
+    Only the vocabulary-shaping fields live here. The FOCUS *embedding* knobs
+    (the fastText hyperparameters) do not change the tokenizer and are keyed
+    separately by `focus.embedding_hash`, so tuning them reuses the tokenizer.
+    """
+
+    artifact_name = "FOCUS Tokenizer"
+
+    pretrained_name: str
+    vocab_size: int
+    tokenizer_algorithm: str | None
+    character_coverage: float
+    num_samples: int | None
+    seed: int
+
+    @classmethod
+    def from_args(cls, args: DictConfig) -> "FocusTokenizerConfig":
+        return cls(
+            pretrained_name=args.model.pretrained_name,
+            vocab_size=args.focus.vocab_size,
+            tokenizer_algorithm=args.focus.get("tokenizer_algorithm"),
+            character_coverage=args.focus.get("character_coverage", 1.0),
+            num_samples=args.focus.get("num_samples"),
+            seed=args.seed,
         )
 
     def to_dict(self) -> dict:
@@ -252,6 +309,13 @@ def processed_cache_dirname(args: DictConfig) -> str:
     task = args.model.get("task")
     if language is not None:
         parts.append(f"{_slugify(language)}-{_slugify(task)}" if task else _slugify(language))
+
+    # A replaced vocabulary changes every cached label, so it gets its own
+    # subcache beside the pretrained-vocabulary one rather than invalidating it.
+    from src.focus import is_enabled as focus_is_enabled, tokenizer_id
+
+    if focus_is_enabled(args):
+        parts.append(_slugify(tokenizer_id(args)))
 
     return "processed_" + "_".join(parts)
 

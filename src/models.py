@@ -16,16 +16,24 @@ import sys
 from omegaconf import DictConfig
 from transformers import ProcessorMixin
 
+from src import focus
 from src.processors import ModelSpec, get_model_spec, resolve_language
 
 
-def setup_model(args: DictConfig, processor: ProcessorMixin):
+def setup_model(
+    args: DictConfig,
+    processor: ProcessorMixin,
+    cache_dir: str | None = None,
+):
     """Load and configure a pretrained model for fine-tuning.
 
     Args:
         args: Full Hydra config (needs args.model.*).
         processor: The combined processor (to determine vocab_size and
             pad_token_id).
+        cache_dir: The dataset cache directory. Required only when
+            `focus.enabled` is set, which loads its cached tokenizer and
+            embeddings from under it.
 
     Returns:
         A configured HuggingFace model ready for training.
@@ -43,6 +51,16 @@ def setup_model(args: DictConfig, processor: ProcessorMixin):
         ignore_mismatched_sizes=True,
         **config_overrides,
     )
+
+    # FOCUS must run before generation is configured: it rewrites the token ids
+    # that `_configure_generation` then reads and pins.
+    if focus.is_enabled(args):
+        if cache_dir is None:
+            raise ValueError(
+                "focus.enabled=true requires cache_dir so setup_model can find "
+                "the FOCUS tokenizer and cached embeddings."
+            )
+        focus.apply_to_model(args, model, processor.tokenizer, spec, cache_dir)
 
     if spec.uses_generation:
         _configure_generation(args, model, spec)
