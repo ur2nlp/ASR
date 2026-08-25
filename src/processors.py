@@ -39,10 +39,12 @@ from transformers import (
     WhisperTokenizerFast,
 )
 
+from src import focus
 from src.collators import (
     DataCollatorCTCWithPadding,
     DataCollatorSpeechSeq2SeqWithPadding,
 )
+from src.artifact_configs import FocusTokenizerConfig
 from src.vocab import create_ctc_tokenizer, generate_vocab, save_vocab
 
 
@@ -250,20 +252,26 @@ def setup_tokenizer(
     args: DictConfig,
     train_texts: list[str] | None = None,
     vocab_dir: str | None = None,
+    cache_dir: str | None = None,
 ):
     """Build the tokenizer appropriate to the configured architecture.
 
     CTC models get a character tokenizer generated from the training
     transcripts (cached as `vocab.json` under `vocab_dir`). Seq2seq models
     reuse the pretrained checkpoint's subword tokenizer, since their decoder
-    embeddings are tied to it.
+    embeddings are tied to it -- unless `focus.enabled` is set, in which case a
+    fresh subword vocabulary is trained over the transcripts and the pretrained
+    embeddings are transferred onto it (see `src/focus.py`).
 
     Args:
         args: Full Hydra config (needs `args.model.*`).
         train_texts: Normalized training transcripts. Required only when the
-            spec's `tokenizer_source` is "vocab" and no cached vocab exists.
+            spec's `tokenizer_source` is "vocab" and no cached vocab exists, or
+            when FOCUS is enabled and its corpus has not been written yet.
         vocab_dir: Directory holding (or receiving) `vocab.json`. Required only
             when `tokenizer_source` is "vocab".
+        cache_dir: The dataset cache directory. Required only when FOCUS is
+            enabled, which roots its artifacts under `<cache_dir>/focus/`.
 
     Returns:
         A tokenizer instance.
@@ -273,6 +281,9 @@ def setup_tokenizer(
             or if the spec declares an unknown tokenizer source.
     """
     spec = get_model_spec(args.model.type)
+
+    if focus.is_enabled(args):
+        return _setup_focus_tokenizer(args, spec, train_texts, cache_dir)
 
     if spec.tokenizer_source == "vocab":
         if vocab_dir is None:
@@ -300,6 +311,63 @@ def setup_tokenizer(
     )
 
 
+def _setup_focus_tokenizer(
+    args: DictConfig,
+    spec: ModelSpec,
+    train_texts: list[str] | None,
+    cache_dir: str | None,
+):
+    """Train (or load) a FOCUS tokenizer and configure its prefix tokens.
+
+    FOCUS replaces the checkpoint's subword vocabulary with one learned from the
+    target transcripts, so it only makes sense for an architecture that would
+    otherwise have used the pretrained vocabulary. A CTC model already builds
+    its vocabulary from the training data, which is what FOCUS exists to do.
+    """
+    if spec.tokenizer_source != "pretrained":
+        raise ValueError(
+            f"focus.enabled=true is not supported for model type "
+            f"'{args.model.type}'. FOCUS replaces a pretrained subword "
+            f"vocabulary with one learned from the target transcripts, but this "
+            f"architecture already builds its vocabulary from them "
+            f"(tokenizer_source='{spec.tokenizer_source}'). Set focus.enabled=false."
+        )
+    if cache_dir is None:
+        raise ValueError(
+            "focus.enabled=true requires cache_dir so the FOCUS corpus, "
+            "tokenizer, and embedding cache can be placed under it."
+        )
+
+    paths = focus.resolve_paths(args, cache_dir)
+
+    tokenizer_cached = os.path.exists(os.path.join(paths.tokenizer_dir, "tokenizer.json"))
+    if train_texts is not None:
+        focus.prepare_corpus(
+            train_texts,
+            paths,
+            num_samples=args.focus.get("num_samples"),
+            seed=args.seed,
+        )
+    elif not tokenizer_cached:
+        raise ValueError(
+            f"No cached FOCUS tokenizer at {paths.tokenizer_dir} and no "
+            f"train_texts given to train one from."
+        )
+
+    config = FocusTokenizerConfig.from_args(args)
+    config_path = os.path.join(paths.tokenizer_dir, "focus_config.yaml")
+    config.check_cached(config_path)
+
+    tokenizer = focus.build_tokenizer(args, spec, paths)
+    config.save(config_path)
+
+    # The prefix tokens are rebuilt against the new ids exactly as they are for
+    # a pretrained tokenizer; the special-token block was carried over by name,
+    # so `set_prefix_tokens` finds every token it needs.
+    _configure_prefix_tokens(args, spec, tokenizer)
+    return tokenizer
+
+
 def _load_pretrained_tokenizer(args: DictConfig, spec: ModelSpec):
     """Load a checkpoint's own tokenizer, configured for language and task.
 
@@ -307,27 +375,39 @@ def _load_pretrained_tokenizer(args: DictConfig, spec: ModelSpec):
     models (Whisper), where they select the special tokens that prefix every
     transcript.
     """
-    language = resolve_language(args, spec)
-    task = args.model.get("task", "transcribe")
-
     tokenizer = spec.tokenizer_class.from_pretrained(args.model.pretrained_name)
-
-    # Passing language/task to from_pretrained is NOT sufficient for the fast
-    # tokenizer: it sets the attributes (so `tokenizer.prefix_tokens` looks
-    # correct) but the post-processor template that actually wraps encoded text
-    # is built at construction time and is not rebuilt from those kwargs. The
-    # result is silently wrong labels, missing the <|lang|> and <|task|> tokens.
-    # set_prefix_tokens() rebuilds the template, so call it explicitly.
-    if hasattr(tokenizer, "set_prefix_tokens"):
-        tokenizer.set_prefix_tokens(language=language, task=task)
-        _verify_prefix_tokens(tokenizer)
+    _configure_prefix_tokens(args, spec, tokenizer)
 
     print(
         f"Loaded pretrained tokenizer from {args.model.pretrained_name} "
-        f"(language={language}, task={task}, vocab_size={len(tokenizer)})",
+        f"(vocab_size={len(tokenizer)})",
         file=sys.stderr,
     )
     return tokenizer
+
+
+def _configure_prefix_tokens(args: DictConfig, spec: ModelSpec, tokenizer) -> None:
+    """Pin the language and task tokens that prefix every encoded transcript.
+
+    Passing language/task to `from_pretrained` is NOT sufficient for the fast
+    tokenizer: it sets the attributes (so `tokenizer.prefix_tokens` looks
+    correct) but the post-processor template that actually wraps encoded text is
+    built at construction time and is not rebuilt from those kwargs. The result
+    is silently wrong labels, missing the <|lang|> and <|task|> tokens.
+    `set_prefix_tokens()` rebuilds the template, so call it explicitly.
+    """
+    language = resolve_language(args, spec)
+    task = args.model.get("task", "transcribe")
+
+    if not hasattr(tokenizer, "set_prefix_tokens"):
+        return
+
+    tokenizer.set_prefix_tokens(language=language, task=task)
+    _verify_prefix_tokens(tokenizer)
+    print(
+        f"Prefix tokens configured: language={language}, task={task}",
+        file=sys.stderr,
+    )
 
 
 def _verify_prefix_tokens(tokenizer) -> None:

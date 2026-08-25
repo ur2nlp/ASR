@@ -14,6 +14,9 @@ dependencies:
   - pyctcdecode
   - pytest
   - pyyaml
+  - sentencepiece=0.*
+  - tokenizers=0.*
+  - protobuf
   - transformers>=4.40,<5
   - tqdm
   - pip
@@ -22,3 +25,4 @@ dependencies:
     - torchaudio
     - kenlm
     - soundfile
+    - deepfocus

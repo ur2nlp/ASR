@@ -1,0 +1,7 @@
+# FOCUS vocabulary replacement off (the default).
+#
+# The model uses whatever vocabulary its ModelSpec says: a character vocab
+# generated from the transcripts for CTC models, the checkpoint's own subword
+# vocabulary for Whisper.
+
+enabled: false

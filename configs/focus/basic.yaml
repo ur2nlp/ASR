@@ -1,0 +1,53 @@
+# FOCUS vocabulary replacement and embedding reinitialization.
+#
+# Trains a fresh SentencePiece vocabulary over the target transcripts, keeps the
+# checkpoint's entire special-token block, and initializes the new embedding
+# matrix with FOCUS (Dobler & de Melo, 2023, https://arxiv.org/abs/2305.14481):
+# tokens the two vocabularies share keep their pretrained embeddings, and the
+# rest become sparsemax-weighted combinations of those, with weights from a
+# fastText model trained on the target transcripts.
+#
+# Only applies to models whose tokenizer comes from the checkpoint -- that is,
+# Whisper and other seq2seq decoders. A CTC model already builds its vocabulary
+# from the training data and errors if this is enabled.
+#
+#     python -m src dataset=zulu_whisper model=whisper-small-zulu \
+#         training=zulu_whisper focus=basic
+
+enabled: true
+
+# Size of the *learned* vocabulary. The checkpoint's special tokens are added on
+# top of this (1608 of them for Whisper), so the model's final vocab_size is
+# larger. Whisper's own subword block is 50257 pieces trained on 680k hours of
+# multilingual audio; a single-language ASR transcript corpus supports nothing
+# like that, and SentencePiece errors outright if the target is unreachable.
+# 1024-8192 is the useful range for a few hours of speech.
+vocab_size: 4096
+
+# `null` inherits the base tokenizer's algorithm (BPE for Whisper); 'unigram'
+# or 'bpe' overrides it. Unigram tends to be better behaved on small corpora.
+tokenizer_algorithm: null
+
+# SentencePiece character coverage. 1.0 is right for a single Latin- or
+# Cyrillic-script language; lower it (0.9995) only for a large character set.
+# Characters left uncovered become <unk> at encoding time, so on ASR data --
+# where preprocessing has already stripped punctuation and case -- 1.0 is
+# almost always what you want.
+character_coverage: 1.0
+
+# Transcripts to sample for tokenizer and fastText training. `null` uses all of
+# them, which is the sensible default: ASR transcript corpora are small enough
+# that subsampling only costs coverage.
+num_samples: null
+
+# --- fastText auxiliary embeddings (FOCUS's similarity space) ---
+# These do not affect the tokenizer, only the embedding values, and are keyed
+# separately -- changing one recomputes embeddings without retraining the vocab.
+
+# Minimum occurrences for a token to get a fastText vector. Tokens below it are
+# initialized from N(source_mean, source_std) instead of by FOCUS. The deepfocus
+# default is 10, which discards most of the vocabulary on a corpus this size;
+# 1 keeps everything.
+fasttext_model_min_count: 1
+fasttext_model_epochs: 3
+fasttext_model_dim: 100
