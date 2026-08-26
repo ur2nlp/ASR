@@ -764,6 +764,139 @@ def _load_cached_embeddings(
     return input_embeddings, torch.load(output_pt, weights_only=True)
 
 
+class _SourceVocabularyView:
+    """A source tokenizer with the empty-canonical-form tokens hidden.
+
+    `deepfocus` keys its source/target overlap on each token's *decoded* form,
+    and Whisper has 1502 tokens whose decoded form is the empty string: the
+    literal `""` piece at id 50256, and all 1501 `<|0.00|>`-style timestamp
+    tokens, which `WhisperTokenizerFast.decode` filters out of its output. That
+    breaks deepfocus twice over:
+
+      * `vocab_helper.get_canonicalize_token_fn` does an unguarded `k[0]` over
+        the vocabulary keys, so the `""` key raises `IndexError` outright;
+      * every one of those 1502 tokens canonicalizes to `""`, so they land in a
+        single overlap bucket and each target timestamp token silently takes the
+        *first* source embedding in that bucket. All 1501 rows would collapse
+        onto one vector, with no error.
+
+    Hiding them from the source view is what the overlap step wants anyway: an
+    empty canonical form is not a meaningful match key. The inherited
+    special-token rows, timestamps included, are then restored exactly by
+    `_restore_special_token_embeddings`, which matches on token *string* and does
+    not go through canonicalization at all.
+
+    Everything other than `get_vocab` delegates to the real tokenizer.
+    """
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+        self._tokenizer = tokenizer
+        self._vocab = self._build_filtered_vocab(tokenizer)
+
+    @staticmethod
+    def _build_filtered_vocab(tokenizer: PreTrainedTokenizerBase) -> dict[str, int]:
+        """Drop vocabulary entries whose canonical form would be empty.
+
+        The emptiness test uses deepfocus's *own* canonicalization function
+        rather than a local reimplementation, so this cannot drift from the
+        bucketing it is compensating for. That matters: the rule is not simply
+        "decodes to nothing". deepfocus also `lstrip()`s, which empties the
+        control-character tokens (`č` is a carriage return in byte-level
+        encoding, `ğ` a unit separator) on top of the literal `""` piece and the
+        timestamps.
+
+        Runs in two passes because `get_canonicalize_token_fn` itself indexes
+        `k[0]` over the vocabulary keys and so must not see the `""` key.
+        """
+        from deepfocus.vocab_helper import get_canonicalize_token_fn
+
+        vocab = {token: token_id for token, token_id in tokenizer.get_vocab().items() if token}
+
+        class _KeysOnly:
+            """Just enough tokenizer for the algorithm-detection heuristic."""
+
+            @staticmethod
+            def get_vocab():
+                return vocab
+
+        canonicalize_token = get_canonicalize_token_fn(_KeysOnly())
+
+        dropped = []
+        for token, token_id in list(vocab.items()):
+            canonical_form, _is_beginning_of_word = canonicalize_token(tokenizer, token_id)
+            if canonical_form == "":
+                dropped.append(token)
+                vocab.pop(token)
+
+        hidden = len(tokenizer.get_vocab()) - len(vocab)
+        if hidden:
+            print(
+                f"Hiding {hidden} source tokens with an empty canonical form "
+                f"from FOCUS overlap matching (e.g. {dropped[:3]}); their "
+                f"embeddings are restored by name afterwards.",
+                file=sys.stderr,
+            )
+        return vocab
+
+    def get_vocab(self) -> dict[str, int]:
+        return dict(self._vocab)
+
+    def __len__(self) -> int:
+        return len(self._tokenizer)
+
+    def __getattr__(self, name):
+        return getattr(self._tokenizer, name)
+
+
+def _restore_special_token_embeddings(
+    source_model,
+    source_tokenizer: PreTrainedTokenizerBase,
+    target_tokenizer: PreTrainedTokenizerBase,
+    input_embeddings: torch.Tensor,
+    output_embeddings: Optional[torch.Tensor],
+) -> None:
+    """Copy every inherited special token's embedding across by name, in place.
+
+    The inherited block is carried over verbatim by `build_tokenizer`, so its
+    embeddings should be the pretrained ones exactly -- there is nothing for
+    FOCUS to infer. Doing it here rather than trusting FOCUS's overlap step
+    makes the guarantee independent of how deepfocus canonicalizes a token, and
+    is what actually keeps the 1501 timestamp embeddings distinct.
+    """
+    source_vocab = source_tokenizer.get_vocab()
+    target_vocab = target_tokenizer.get_vocab()
+    source_input = source_model.get_input_embeddings().weight.detach()
+    source_output = (
+        source_model.get_output_embeddings().weight.detach()
+        if output_embeddings is not None
+        else None
+    )
+
+    restored = 0
+    missing = []
+    for token, source_id in source_tokenizer.get_added_vocab().items():
+        target_id = target_vocab.get(token)
+        if target_id is None:
+            missing.append(token)
+            continue
+        input_embeddings[target_id] = source_input[source_vocab[token]]
+        if source_output is not None:
+            output_embeddings[target_id] = source_output[source_vocab[token]]
+        restored += 1
+
+    if missing:
+        raise ValueError(
+            f"{len(missing)} inherited special tokens are absent from the FOCUS "
+            f"vocabulary (e.g. {missing[:3]}). The special-token block must be "
+            f"carried over intact."
+        )
+
+    print(
+        f"Restored pretrained embeddings for {restored} inherited special tokens",
+        file=sys.stderr,
+    )
+
+
 def _run_focus(
     args: DictConfig,
     source_model,
@@ -788,7 +921,7 @@ def _run_focus(
         )
 
     focus_kwargs = {
-        "source_tokenizer": source_tokenizer,
+        "source_tokenizer": _SourceVocabularyView(source_tokenizer),
         "target_tokenizer": target_tokenizer,
         "target_training_data_path": corpus_jsonl,
         "fasttext_model_epochs": args.focus.get("fasttext_model_epochs", 3),
@@ -818,6 +951,14 @@ def _run_focus(
             source_embeddings=source_model.get_output_embeddings().weight,
             **focus_kwargs,
         )
+
+    _restore_special_token_embeddings(
+        source_model=source_model,
+        source_tokenizer=source_tokenizer,
+        target_tokenizer=target_tokenizer,
+        input_embeddings=input_embeddings,
+        output_embeddings=output_embeddings,
+    )
 
     return input_embeddings, output_embeddings
 
