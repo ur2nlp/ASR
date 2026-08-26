@@ -372,3 +372,158 @@ class TestGenerationConfigRemap:
         # The pretrained suppression list indexes the replaced subword block.
         assert generation_config.suppress_tokens == []
         assert model.config.vocab_size == len(target)
+
+@pytest.mark.network
+class TestSpecialTokenEmbeddingRestore:
+    """Regression tests for the two bugs the first cluster run exposed.
+
+    Whisper has 1502 tokens whose deepfocus *canonical form* is empty: the
+    literal `""` piece at id 50256, the 1501 timestamp tokens (which decode to
+    nothing), and the control-character pieces (which `lstrip()` empties). They
+    broke FOCUS twice -- an `IndexError` on the `""` vocabulary key, and, had
+    that been the only fix, a silent collapse of all 1501 timestamp embeddings
+    onto a single vector.
+    """
+
+    def test_restore_copies_every_special_token_by_name(
+        self, whisper_config, tmp_dir, zulu_texts
+    ):
+        import torch
+        from transformers import WhisperForConditionalGeneration, WhisperTokenizerFast
+
+        from src.processors import get_model_spec
+
+        spec = get_model_spec("whisper")
+        paths = focus.resolve_paths(whisper_config, tmp_dir)
+        focus.prepare_corpus(zulu_texts, paths)
+        target = focus.build_tokenizer(whisper_config, spec, paths)
+        source = WhisperTokenizerFast.from_pretrained("openai/whisper-small")
+        model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+
+        # start from noise so a row that is not restored cannot coincidentally
+        # match the source
+        embeddings = torch.randn(len(target), model.config.d_model)
+        focus._restore_special_token_embeddings(
+            source_model=model,
+            source_tokenizer=source,
+            target_tokenizer=target,
+            input_embeddings=embeddings,
+            output_embeddings=None,
+        )
+
+        source_embeddings = model.get_input_embeddings().weight.detach()
+        source_vocab = source.get_vocab()
+        target_vocab = target.get_vocab()
+        for token in source.get_added_vocab():
+            assert torch.equal(
+                embeddings[target_vocab[token]],
+                source_embeddings[source_vocab[token]],
+            ), f"{token} was not restored from the source embeddings"
+
+    def test_timestamp_embeddings_stay_distinct(
+        self, whisper_config, tmp_dir, zulu_texts
+    ):
+        """The collapse this guards against produced no error, only 1501
+        identical rows."""
+        import torch
+        from transformers import WhisperForConditionalGeneration, WhisperTokenizerFast
+
+        from src.processors import get_model_spec
+
+        spec = get_model_spec("whisper")
+        paths = focus.resolve_paths(whisper_config, tmp_dir)
+        focus.prepare_corpus(zulu_texts, paths)
+        target = focus.build_tokenizer(whisper_config, spec, paths)
+        source = WhisperTokenizerFast.from_pretrained("openai/whisper-small")
+        model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+
+        embeddings = torch.zeros(len(target), model.config.d_model)
+        focus._restore_special_token_embeddings(
+            source_model=model,
+            source_tokenizer=source,
+            target_tokenizer=target,
+            input_embeddings=embeddings,
+            output_embeddings=None,
+        )
+
+        timestamps = ["<|0.00|>", "<|5.00|>", "<|15.00|>", "<|30.00|>"]
+        rows = torch.stack(
+            [embeddings[target.convert_tokens_to_ids(t)] for t in timestamps]
+        )
+        for index in range(1, len(timestamps)):
+            assert not torch.equal(rows[0], rows[index]), (
+                f"{timestamps[index]} collapsed onto {timestamps[0]}"
+            )
+
+    def test_missing_special_token_raises(self, whisper_config, tmp_dir, zulu_texts):
+        import torch
+        from transformers import WhisperForConditionalGeneration, WhisperTokenizerFast
+
+        from src.processors import get_model_spec
+
+        spec = get_model_spec("whisper")
+        paths = focus.resolve_paths(whisper_config, tmp_dir)
+        focus.prepare_corpus(zulu_texts, paths)
+        target = focus.build_tokenizer(whisper_config, spec, paths)
+        source = WhisperTokenizerFast.from_pretrained("openai/whisper-small")
+        model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+
+        class _MissingOne:
+            """A source whose special-token block the target does not cover."""
+
+            def __getattr__(self, name):
+                return getattr(source, name)
+
+            @staticmethod
+            def get_added_vocab():
+                return {**source.get_added_vocab(), "<|not-carried-over|>": 999}
+
+        with pytest.raises(ValueError, match="absent from the FOCUS vocabulary"):
+            focus._restore_special_token_embeddings(
+                source_model=model,
+                source_tokenizer=_MissingOne(),
+                target_tokenizer=target,
+                input_embeddings=torch.zeros(len(target), model.config.d_model),
+                output_embeddings=None,
+            )
+
+
+@pytest.mark.network
+class TestSourceVocabularyView:
+    def test_hides_empty_canonical_form_tokens(self):
+        """Whisper's `""` piece crashes deepfocus's `k[0]` heuristic outright."""
+        pytest.importorskip("deepfocus", reason="filter mirrors deepfocus's own rule")
+        from transformers import WhisperTokenizerFast
+
+        source = WhisperTokenizerFast.from_pretrained("openai/whisper-small")
+        view = focus._SourceVocabularyView(source)
+        vocab = view.get_vocab()
+
+        assert "" not in vocab
+        assert "<|0.00|>" not in vocab
+        assert "<|30.00|>" not in vocab
+        # meaningful special tokens must survive: they match by canonical form
+        assert "<|startoftranscript|>" in vocab
+        assert "<|sw|>" in vocab
+        assert len(vocab) < len(source.get_vocab())
+
+    def test_survives_the_deepfocus_heuristic(self):
+        """The exact call that raised IndexError on the first cluster run."""
+        pytest.importorskip("deepfocus")
+        from deepfocus.vocab_helper import get_canonicalize_token_fn
+        from transformers import WhisperTokenizerFast
+
+        source = WhisperTokenizerFast.from_pretrained("openai/whisper-small")
+        with pytest.raises(IndexError):
+            get_canonicalize_token_fn(source)
+
+        get_canonicalize_token_fn(focus._SourceVocabularyView(source))
+
+    def test_delegates_other_attributes(self):
+        pytest.importorskip("deepfocus")
+        from transformers import WhisperTokenizerFast
+
+        source = WhisperTokenizerFast.from_pretrained("openai/whisper-small")
+        view = focus._SourceVocabularyView(source)
+        assert view.convert_ids_to_tokens(50258) == "<|startoftranscript|>"
+        assert len(view) == len(source)
