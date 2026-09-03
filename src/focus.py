@@ -91,15 +91,20 @@ def is_enabled(args: DictConfig) -> bool:
 def tokenizer_id(args: DictConfig) -> str:
     """Name the tokenizer artifact for this configuration.
 
-    Encodes only the fields that change the *vocabulary*; everything else is
-    caught by `FocusTokenizerConfig.check_cached`. The FOCUS-embedding knobs are
-    deliberately absent, so a change to them reuses the tokenizer and only
-    recomputes the embedding sidecar.
+    Encodes the fields that change the *vocabulary*, plus the pretrained model
+    the special-token block and inherited tokenizer files
+    (`_copy_inherited_files`) are drawn from. Different checkpoints can carry
+    different special tokens (or none at all for a non-seq2seq base), so two
+    pretrained models never share a tokenizer directory -- each gets its own
+    cache and initializes independently rather than colliding on a config
+    mismatch. Everything else is caught by `FocusTokenizerConfig.check_cached`.
+    The FOCUS-embedding knobs are deliberately absent, so a change to them
+    reuses the tokenizer and only recomputes the embedding sidecar.
 
     Returns:
-        A directory-safe name such as `focus-v4k-unigram`.
+        A directory-safe name such as `focus-v4k-unigram-whisper-medium`.
     """
-    from src.artifact_configs import format_number
+    from src.artifact_configs import _slugify, format_number
 
     parts = [f"focus-v{format_number(args.focus.vocab_size)}"]
 
@@ -114,6 +119,9 @@ def tokenizer_id(args: DictConfig) -> str:
     coverage = args.focus.get("character_coverage", 1.0)
     if float(coverage) != 1.0:
         parts.append(f"cc{str(coverage).replace('.', 'p')}")
+
+    model_short = args.model.get("short_name") or args.model.pretrained_name
+    parts.append(_slugify(model_short))
 
     return "-".join(parts)
 

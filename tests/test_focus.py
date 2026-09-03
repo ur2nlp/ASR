@@ -88,15 +88,21 @@ class TestNamingAndPaths:
         assert format_number(2_000_000) == "2m"
 
     def test_tokenizer_id_encodes_vocab_and_algorithm(self, whisper_config):
-        assert focus.tokenizer_id(whisper_config) == "focus-v512-unigram"
+        assert focus.tokenizer_id(whisper_config) == "focus-v512-unigram-whisper-small"
 
     def test_tokenizer_id_omits_inherited_algorithm(self, whisper_config):
         whisper_config.focus.tokenizer_algorithm = None
-        assert focus.tokenizer_id(whisper_config) == "focus-v512"
+        assert focus.tokenizer_id(whisper_config) == "focus-v512-whisper-small"
 
     def test_tokenizer_id_tracks_vocab_size(self, whisper_config):
         whisper_config.focus.vocab_size = 4096
         assert "v4k" in focus.tokenizer_id(whisper_config)
+
+    def test_tokenizer_id_differs_across_pretrained_models(self, whisper_config):
+        small_id = focus.tokenizer_id(whisper_config)
+        whisper_config.model.pretrained_name = "openai/whisper-medium"
+        whisper_config.model.short_name = "whisper_medium"
+        assert focus.tokenizer_id(whisper_config) != small_id
 
     def test_paths_rooted_in_cache_dir(self, whisper_config, tmp_dir):
         paths = focus.resolve_paths(whisper_config, tmp_dir)
@@ -113,7 +119,7 @@ class TestNamingAndPaths:
 
     def test_processed_cache_name_includes_focus_id(self, whisper_config):
         name = processed_cache_dirname(whisper_config)
-        assert "focus-v512-unigram" in name
+        assert "focus-v512-unigram-whisper-small" in name
 
     def test_processed_cache_name_excludes_focus_when_off(self, base_config):
         assert "focus" not in processed_cache_dirname(base_config)
