@@ -1,4 +1,11 @@
-"""Tests for src/artifact_configs.py."""
+"""Tests for src/artifact_configs.py.
+
+`dict_diff` and `ArtifactConfig` now come from `lapt-core` and are imported
+through `src.artifact_configs`, which re-exports them. These tests are kept
+pointed at that re-export deliberately: they cover the behaviour ASR depends
+on, from the angle ASR consumes it, and would still catch a bad upgrade of the
+shared package.
+"""
 
 import os
 
@@ -12,7 +19,7 @@ from src.artifact_configs import (
     DatasetConfig,
     ModelConfig,
     ProcessedDatasetConfig,
-    _dict_diff,
+    dict_diff,
     processed_cache_dirname,
     warn_on_legacy_processed_cache,
 )
@@ -20,25 +27,25 @@ from src.artifact_configs import (
 
 class TestDictDiff:
     def test_identical_dicts(self):
-        assert _dict_diff({"a": 1}, {"a": 1}) == []
+        assert dict_diff({"a": 1}, {"a": 1}) == []
 
     def test_value_difference(self):
-        diffs = _dict_diff({"a": 1}, {"a": 2})
+        diffs = dict_diff({"a": 1}, {"a": 2})
         assert len(diffs) == 1
         assert "a" in diffs[0]
 
     def test_missing_key(self):
-        diffs = _dict_diff({"a": 1, "b": 2}, {"a": 1})
+        diffs = dict_diff({"a": 1, "b": 2}, {"a": 1})
         assert len(diffs) == 1
         assert "cached" in diffs[0]
 
     def test_extra_key(self):
-        diffs = _dict_diff({"a": 1}, {"a": 1, "b": 2})
+        diffs = dict_diff({"a": 1}, {"a": 1, "b": 2})
         assert len(diffs) == 1
         assert "current" in diffs[0]
 
     def test_nested_diff(self):
-        diffs = _dict_diff(
+        diffs = dict_diff(
             {"a": {"b": 1}},
             {"a": {"b": 2}},
         )
@@ -46,7 +53,7 @@ class TestDictDiff:
         assert "a.b" in diffs[0]
 
     def test_empty_dicts(self):
-        assert _dict_diff({}, {}) == []
+        assert dict_diff({}, {}) == []
 
 
 class TestArtifactConfigSaveAndCheck:
