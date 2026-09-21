@@ -24,7 +24,6 @@ from omegaconf import DictConfig, OmegaConf
 
 __all__ = [
     "ArtifactConfig",
-    "DatasetConfig",
     "FocusTokenizerConfig",
     "ModelConfig",
     "ProcessedDatasetConfig",
@@ -39,49 +38,6 @@ __all__ = [
 # Concrete config classes
 # ---------------------------------------------------------------------------
 
-class DatasetConfig(ArtifactConfig):
-    """Tracks configuration for the untokenized dataset stage."""
-
-    artifact_name = "Untokenized Dataset"
-
-    def __init__(self, config: dict):
-        self._config = config
-
-    @classmethod
-    def from_args(cls, args: DictConfig) -> "DatasetConfig":
-        config = {
-            "type": args.dataset.type,
-            "id": args.dataset.id,
-            "seed": args.seed,
-        }
-
-        dataset_type = args.dataset.type
-        if dataset_type == "paired":
-            config["path"] = args.dataset.path
-            config["audio_ext"] = args.dataset.get("audio_ext", ".wav")
-            config["transcript_ext"] = args.dataset.get("transcript_ext", ".txt")
-            config["recursive"] = args.dataset.get("recursive", False)
-        elif dataset_type == "audiofolder":
-            config["path"] = args.dataset.path
-        elif dataset_type == "huggingface":
-            config["name"] = args.dataset.name
-            config["config"] = getattr(args.dataset, "config", None)
-        elif dataset_type == "concat":
-            config["sources"] = OmegaConf.to_container(
-                args.dataset.sources, resolve=True
-            )
-
-        # include preprocessing config since it affects cached data
-        config["preprocessing"] = OmegaConf.to_container(
-            args.preprocessing, resolve=True
-        )
-
-        return cls(config)
-
-    def to_dict(self) -> dict:
-        return dict(self._config)
-
-
 @dataclass
 class ProcessedDatasetConfig(ArtifactConfig):
     """Tracks configuration for the processed (feature-extracted) dataset."""
@@ -94,6 +50,13 @@ class ProcessedDatasetConfig(ArtifactConfig):
     max_audio_length_seconds: float | None
     vocab_size: int
     max_label_length: int | None = None
+    # Text normalization settings. These belong here, not on the untokenized
+    # stage: that cache is written from the raw source before `normalize_dataset`
+    # runs, so preprocessing cannot change its contents -- while this cache holds
+    # label-encoded transcripts, which it changes completely. Recording it on the
+    # wrong stage meant a preprocessing change hard-failed a cache it could not
+    # affect, and was then invisible to the cache it did.
+    preprocessing: dict | None = None
     # Only meaningful for multilingual seq2seq models, where they change the
     # special tokens prefixed to every encoded transcript and therefore the
     # cached labels.
@@ -115,6 +78,7 @@ class ProcessedDatasetConfig(ArtifactConfig):
             max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
             vocab_size=vocab_size,
             max_label_length=args.dataset.get("max_label_length"),
+            preprocessing=OmegaConf.to_container(args.preprocessing, resolve=True),
             language=args.model.get("language"),
             task=args.model.get("task"),
             focus_tokenizer_id=tokenizer_id(args) if focus_is_enabled(args) else None,

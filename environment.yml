@@ -41,7 +41,7 @@ dependencies:
     # transformers>=4.57,<4.58, which would conflict with the >=4.40,<5 above.
     # Pin a tag, never @main -- the cache paths this package produces have to be
     # reproducible.
-    - lapt-core @ git+https://github.com/ur2nlp/LAPT.git@lapt-core-v0.1.0#subdirectory=packages/lapt-core
+    - lapt-core[datasets] @ git+https://github.com/ur2nlp/LAPT.git@lapt-core-v0.1.0#subdirectory=packages/lapt-core
     # Floor of 2.6 is a genuine requirement, not a convenience bump:
     # transformers' `check_torch_load_is_safe` raises outright below it, over
     # CVE-2025-32434 in `torch.load`. It applies when loading `.bin`

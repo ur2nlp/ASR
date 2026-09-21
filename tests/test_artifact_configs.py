@@ -14,9 +14,9 @@ import yaml
 
 from omegaconf import OmegaConf
 
+from src.sources import source_config_record
 from src.artifact_configs import (
     ArtifactConfig,
-    DatasetConfig,
     ModelConfig,
     ProcessedDatasetConfig,
     dict_diff,
@@ -125,18 +125,59 @@ class TestArtifactConfigSaveAndCheck:
         assert config2.check_cached(path, error_on_mismatch=False) is False
 
 
-class TestDatasetConfig:
-    def test_from_args(self, base_config):
-        config = DatasetConfig.from_args(base_config)
-        d = config.to_dict()
-        assert d["type"] == "huggingface"
-        assert d["id"] == "test_lang"
+class TestUntokenizedRecord:
+    """What the untokenized stage records, now that the source artifact owns it.
+
+    `DatasetConfig` is gone: each source in `src/sources/` declares its own
+    `config()`, which is both the cache key and the saved record.
+    """
+
+    def test_names_the_type_and_the_source(self, base_config):
+        record = source_config_record(base_config.dataset, base_config.seed)
+        assert record["type"] == "huggingface"
+        assert record["name"] == "test_dataset"
 
     def test_round_trip(self, tmp_dir, base_config):
-        config = DatasetConfig.from_args(base_config)
-        path = os.path.join(tmp_dir, "dataset.yaml")
-        config.save(path)
-        assert config.check_cached(path) is True
+        record = source_config_record(base_config.dataset, base_config.seed)
+        path = os.path.join(tmp_dir, "config.yaml")
+        with open(path, "w") as config_file:
+            yaml.dump(record, config_file)
+        with open(path) as config_file:
+            assert yaml.safe_load(config_file) == record
+
+
+class TestPreprocessingIsRecordedOnTheStageItAffects:
+    """Regression guard for a mis-stated dependency.
+
+    The untokenized cache is written from the raw source *before*
+    `normalize_dataset` runs, so text normalization cannot change it. The
+    processed cache holds label-encoded transcripts, so normalization changes
+    it completely. Recording it on the untokenized stage meant a preprocessing
+    change hard-failed a cache it could not affect, while the cache it did
+    affect was reused silently -- `ProcessedDatasetConfig` did not track it and
+    `processed_cache_dirname` did not either, so nothing noticed.
+    """
+
+    def test_untokenized_record_ignores_preprocessing(self, base_config):
+        other = base_config.copy()
+        other.preprocessing.remove_punctuation = not base_config.preprocessing.remove_punctuation
+
+        assert source_config_record(base_config.dataset, base_config.seed) == \
+            source_config_record(other.dataset, other.seed)
+
+    def test_untokenized_record_ignores_seed(self, base_config):
+        other = base_config.copy()
+        other.seed = base_config.seed + 1
+
+        assert source_config_record(base_config.dataset, base_config.seed) == \
+            source_config_record(other.dataset, other.seed)
+
+    def test_processed_record_tracks_preprocessing(self, base_config):
+        other = base_config.copy()
+        other.preprocessing.remove_punctuation = not base_config.preprocessing.remove_punctuation
+
+        assert ProcessedDatasetConfig.from_args(base_config, 32).to_dict() != \
+            ProcessedDatasetConfig.from_args(other, 32).to_dict()
 
 
 class TestProcessedDatasetConfig:

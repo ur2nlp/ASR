@@ -10,13 +10,13 @@ from omegaconf import OmegaConf
 
 from src.data import (
     DataCollatorCTCWithPadding,
-    _load_paired,
-    _standardize_columns,
     ensure_train_dev_split,
     load_dataset_from_config,
     load_external_eval_sets,
     normalize_dataset,
 )
+from src.sources.base import standardize_columns
+from src.sources.paired import PairedDataset
 from src.processors import setup_processor
 from src.vocab import create_ctc_tokenizer
 
@@ -42,24 +42,21 @@ class TestStandardizeColumns:
         ds = DatasetDict({
             "train": Dataset.from_dict({"sound": [1, 2], "text": ["a", "b"]}),
         })
-        config = OmegaConf.create({"audio_column": "sound", "text_column": "text"})
-        result = _standardize_columns(ds, config)
+        result = standardize_columns(ds, "sound", "text")
         assert "audio" in result["train"].column_names
 
     def test_rename_text_column(self):
         ds = DatasetDict({
             "train": Dataset.from_dict({"audio": [1, 2], "sentence": ["a", "b"]}),
         })
-        config = OmegaConf.create({"audio_column": "audio", "text_column": "sentence"})
-        result = _standardize_columns(ds, config)
+        result = standardize_columns(ds, "audio", "sentence")
         assert "transcription" in result["train"].column_names
 
     def test_no_rename_if_standard(self):
         ds = DatasetDict({
             "train": Dataset.from_dict({"audio": [1, 2], "transcription": ["a", "b"]}),
         })
-        config = OmegaConf.create({"audio_column": "audio", "text_column": "transcription"})
-        result = _standardize_columns(ds, config)
+        result = standardize_columns(ds, "audio", "transcription")
         assert "audio" in result["train"].column_names
         assert "transcription" in result["train"].column_names
 
@@ -105,7 +102,7 @@ class TestLoadPaired:
         _write_pair(tmp_dir, "utt002", "goodbye")
         config = OmegaConf.create({"type": "paired", "path": tmp_dir})
 
-        result = _load_paired(config)
+        result = PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
         assert set(result.keys()) == {"train"}
         assert len(result["train"]) == 2
@@ -118,7 +115,7 @@ class TestLoadPaired:
         _write_pair(tmp_dir, "utt001", "  hello world\n")
         config = OmegaConf.create({"type": "paired", "path": tmp_dir})
 
-        result = _load_paired(config)
+        result = PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
         assert result["train"]["transcription"][0] == "hello world"
 
@@ -128,7 +125,7 @@ class TestLoadPaired:
         _write_pair(os.path.join(tmp_dir, "test"), "c", "test utterance")
         config = OmegaConf.create({"type": "paired", "path": tmp_dir})
 
-        result = _load_paired(config)
+        result = PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
         assert set(result.keys()) == {"train", "dev", "test"}
         assert result["dev"]["transcription"][0] == "dev utterance"
@@ -140,7 +137,7 @@ class TestLoadPaired:
             {"type": "paired", "path": tmp_dir, "recursive": True}
         )
 
-        result = _load_paired(config)
+        result = PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
         assert len(result["train"]) == 2
 
@@ -149,7 +146,7 @@ class TestLoadPaired:
         _write_pair(os.path.join(tmp_dir, "nested"), "deep", "nested")
         config = OmegaConf.create({"type": "paired", "path": tmp_dir})
 
-        result = _load_paired(config)
+        result = PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
         assert len(result["train"]) == 1
 
@@ -159,7 +156,7 @@ class TestLoadPaired:
         sf.write(os.path.join(tmp_dir, "utt002.wav"), np.zeros(1600, np.float32), 16000)
         config = OmegaConf.create({"type": "paired", "path": tmp_dir})
 
-        result = _load_paired(config)
+        result = PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
         assert len(result["train"]) == 1
 
@@ -172,7 +169,7 @@ class TestLoadPaired:
             {"type": "paired", "path": tmp_dir, "audio_ext": ".flac"}
         )
 
-        result = _load_paired(config)
+        result = PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
         assert len(result["train"]) == 1
 
@@ -181,12 +178,12 @@ class TestLoadPaired:
             {"type": "paired", "path": os.path.join(tmp_dir, "nonexistent")}
         )
         with pytest.raises(FileNotFoundError):
-            _load_paired(config)
+            PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
     def test_no_audio_files_raises(self, tmp_dir):
         config = OmegaConf.create({"type": "paired", "path": tmp_dir})
         with pytest.raises(FileNotFoundError):
-            _load_paired(config)
+            PairedDataset.from_config("", OmegaConf.to_container(config, resolve=True)).load()
 
     def test_dispatcher_routes_and_caches(self, tmp_dir):
         data_dir = os.path.join(tmp_dir, "raw")
