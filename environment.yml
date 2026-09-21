@@ -39,9 +39,16 @@ dependencies:
     # than hand-copied into src/artifact_configs.py as it used to be. Depending
     # on lapt-core rather than lapt is deliberate: lapt pins
     # transformers>=4.57,<4.58, which would conflict with the >=4.40,<5 above.
-    # Pin a tag, never @main -- the cache paths this package produces have to be
-    # reproducible.
-    - lapt-core[datasets] @ git+https://github.com/ur2nlp/LAPT.git@lapt-core-v0.1.0#subdirectory=packages/lapt-core
+    # Pin a tag, never a branch -- the cache paths this package produces have to
+    # be reproducible.
+    #
+    # A release tarball rather than a git URL, because pip needs the `git`
+    # binary to clone one and a compute node is not guaranteed to have it
+    # (BlueHive3 compute nodes do not, without `module load git`). The tarball
+    # is fetched over plain HTTPS and installs identically. If this repository
+    # ever goes private, swap back to:
+    #   lapt-core[datasets] @ git+https://github.com/ur2nlp/LAPT.git@lapt-core-v0.1.0#subdirectory=packages/lapt-core
+    - lapt-core[datasets] @ https://github.com/ur2nlp/LAPT/archive/refs/tags/lapt-core-v0.1.0.tar.gz#subdirectory=packages/lapt-core
     # Floor of 2.6 is a genuine requirement, not a convenience bump:
     # transformers' `check_torch_load_is_safe` raises outright below it, over
     # CVE-2025-32434 in `torch.load`. It applies when loading `.bin`
