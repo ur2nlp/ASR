@@ -9,6 +9,12 @@ dependencies:
   - hydra-core=1.*
   - jiwer
   - librosa
+  # Capped for the wider stack, not for any one package. plotnine, the original
+  # reason, no longer justifies it: 0.15.x declares numpy>=1.23.5 with no upper
+  # bound and renders identically under numpy 2.4 (verified in LAPT, same
+  # plotting code). What is untested is torch/torchaudio/transformers/datasets
+  # under numpy 2, which is the real risk surface. Drop this once a full
+  # environment has been built and a training run smoke-tested against it.
   - numpy<2.0
   - plotnine
   - pyctcdecode
@@ -17,11 +23,24 @@ dependencies:
   - sentencepiece=0.*
   - tokenizers=0.*
   - protobuf
+  # Capped below 5 because HuggingFace has repeatedly shipped breaking changes
+  # in minor releases; an unbounded requirement would silently rot for anyone
+  # forking this template, and that breakage is not hardware-specific. The
+  # floor is the oldest release this fork is known to work with, not a verified
+  # minimum. Project branches pin an exact version; see cluster-pins.txt.
   - transformers>=4.40,<5
   - tqdm
   - pip
   - pip:
+    # Floor of 2.6 is a genuine requirement, not a convenience bump:
+    # transformers' `check_torch_load_is_safe` raises outright below it, over
+    # CVE-2025-32434 in `torch.load`. It applies when loading `.bin`
+    # checkpoints; safetensors is exempt. No upper bound -- the CUDA build is
+    # the installing site's concern, not this template's.
     - torch>=2.6
+    # Deliberately unpinned, and NOT assumed to track torch: torchaudio 2.11.0
+    # and torch 2.14.0 coexist in a working environment, so the version numbers
+    # are decoupled and pinning torch does not constrain this transitively.
     - torchaudio
     - kenlm
     - soundfile
