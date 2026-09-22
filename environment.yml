@@ -50,8 +50,8 @@ dependencies:
     # (BlueHive3 compute nodes do not, without `module load git`). The tarball
     # is fetched over plain HTTPS and installs identically. If this repository
     # ever goes private, swap back to:
-    #   lapt-core[datasets] @ git+https://github.com/ur2nlp/LAPT.git@lapt-core-v0.1.1#subdirectory=packages/lapt-core
-    - lapt-core[datasets] @ https://github.com/ur2nlp/LAPT/archive/refs/tags/lapt-core-v0.1.1.tar.gz#subdirectory=packages/lapt-core
+    #   lapt-core[datasets] @ git+https://github.com/ur2nlp/LAPT.git@lapt-core-v0.1.2#subdirectory=packages/lapt-core
+    - lapt-core[datasets] @ https://github.com/ur2nlp/LAPT/archive/refs/tags/lapt-core-v0.1.2.tar.gz#subdirectory=packages/lapt-core
     # Floor of 2.6 is a genuine requirement, not a convenience bump:
     # transformers' `check_torch_load_is_safe` raises outright below it, over
     # CVE-2025-32434 in `torch.load`. It applies when loading `.bin`
