@@ -1,8 +1,5 @@
 """Several sources concatenated into one corpus."""
 
-import sys
-
-from datasets import DatasetDict, concatenate_datasets
 from lapt_core.composites import ConcatArtifact
 
 from src.sources.base import SOURCE_TYPES
@@ -11,53 +8,22 @@ from src.sources.base import SOURCE_TYPES
 class AudioConcatDataset(ConcatArtifact):
     """Concatenate sources, preserving every split they carry.
 
-    Everything except `build` comes from `lapt_core`: the child factory seam,
-    the per-child cache directories keyed by source id, and the `config()`
-    record that captures the whole child tree.
+    Everything comes from `lapt_core`: the child factory seam, the per-child
+    cache directories keyed by source id, the `config()` record covering the
+    whole child tree, and the split-by-split concatenation.
 
-    `build` is overridden because the shared default concatenates only the
-    `train` split and returns a single-split dataset. That suits a corpus whose
-    sources are undifferentiated text, but speech corpora routinely arrive
-    pre-split -- a Hub dataset with `train`/`validation`/`test`, a paired
-    directory with `train/` and `test/` subdirectories -- and dropping those
-    would silently discard held-out data that the config asked for. Splits are
-    therefore unioned: each split name present in any source becomes a split of
-    the result, concatenated across the sources that have it.
+    That last one used to be overridden here. The shared `build` took each
+    child's `train` and returned a single-split result, which suited a corpus
+    of undifferentiated text but silently discarded held-out data for speech
+    corpora, which routinely arrive pre-split -- a Hub dataset with
+    train/validation/test, a paired directory with train/ and test/
+    subdirectories. Being the first thing a second implementation found wrong
+    with that interface made it a defect in the shared layer rather than a
+    local need, so the behaviour moved upstream in lapt-core 0.1.1 and this
+    class is now a registration shim.
     """
 
     type_name = "concat"
-
-    def build(self, deps) -> DatasetDict:
-        """Resolve each child and concatenate them split by split.
-
-        Args:
-            deps: Unused; the child set is known only from the configuration,
-                so children are resolved here rather than injected.
-
-        Returns:
-            A `DatasetDict` holding every split name any source carried.
-        """
-        print(f"Concatenating {len(self.sources)} dataset sources", file=sys.stderr)
-
-        splits: dict[str, list] = {}
-        for index, (child_id, child) in enumerate(self.children()):
-            child_data = child.resolve()
-            for split_name, split_data in child_data.items():
-                splits.setdefault(split_name, []).append(split_data)
-            sizes = ", ".join(
-                f"{name}={len(data)}" for name, data in child_data.items()
-            )
-            print(f"  Source {index} ({child_id}): {sizes}", file=sys.stderr)
-
-        concatenated = DatasetDict({
-            split_name: concatenate_datasets(split_list)
-            for split_name, split_list in splits.items()
-        })
-        totals = ", ".join(
-            f"{name}={len(data)}" for name, data in concatenated.items()
-        )
-        print(f"  Concatenated to {totals}", file=sys.stderr)
-        return concatenated
 
     @classmethod
     def from_config(
