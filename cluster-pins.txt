@@ -1,0 +1,38 @@
+# Versions of the CIRC cluster `asr` environment, as of the 2026-09 rebuild.
+#
+# Why this is a separate file rather than tighter bounds in environment.yml:
+# environment.yml is byte-identical between `main` and the project branches, so
+# `git merge main` never conflicts on it. Pinning in place would put a conflict
+# on those lines in every propagation, forever. This file does not exist on
+# `main`, which deliberately keeps loose, hardware-neutral bounds so a fork is
+# not tied to this site's GPUs.
+#
+# Weaker claim than LAPT's equivalent on `gothic`: zulu has so far produced
+# pilot runs only, so this records the environment rather than guaranteeing
+# reproducibility of a published number. Treat it as "what worked", not "what
+# is required".
+#
+# Apply after creating the environment:
+#
+#     conda env create -f environment.yml
+#     conda activate asr
+#     conda install --file cluster-pins.txt
+#     pip install torch==2.14.0 torchaudio==2.11.0
+#
+# torch and torchaudio are comments rather than spec lines because they install
+# through pip (see the pip block in environment.yml) and `conda install --file`
+# cannot read pip requirements.
+
+transformers=4.57.6
+tokenizers=0.22.2
+datasets=3.6.0
+
+# Installed via pip, not conda -- see the header:
+#   torch==2.14.0           (cluster CUDA is 13.4)
+#   torchaudio==2.11.0      (does NOT track torch's version; see environment.yml)
+#
+# Deliberately absent:
+#   numpy       -- environment.yml already caps it below 2.0, and pinning the
+#                  exact patch buys reproducibility this branch is not claiming.
+#   accelerate  -- installs through pip as of 722ef3b, so a conda spec file
+#                  cannot pin it; the cluster version was not recorded.
