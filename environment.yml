@@ -8,12 +8,16 @@ dependencies:
   - hydra-core=1.*
   - jiwer
   - librosa
-  # Capped for the wider stack, not for any one package. plotnine, the original
-  # reason, no longer justifies it: 0.15.x declares numpy>=1.23.5 with no upper
-  # bound and renders identically under numpy 2.4 (verified in LAPT, same
-  # plotting code). What is untested is torch/torchaudio/transformers/datasets
-  # under numpy 2, which is the real risk surface. Drop this once a full
-  # environment has been built and a training run smoke-tested against it.
+  # Required, not precautionary: pyctcdecode declares `numpy<2.0.0` in every
+  # release it has ever published, 0.0.1 through the current 0.5.0, so this cap
+  # cannot be lifted while CTC beam-search decoding is a dependency. Attempting
+  # it gives pip ResolutionImpossible, not a runtime surprise.
+  #
+  # plotnine was the reason once recorded here; that reason is dead (0.15.x
+  # declares numpy>=1.23.5 with no ceiling and renders identically under numpy
+  # 2.4). Everything else in this file resolves against numpy 2 -- librosa
+  # 0.11, soundfile 0.14, jiwer 4.0, evaluate 0.4.6, numba 0.67, transformers.
+  # pyctcdecode is the sole blocker, verified by pip resolution 2026-09-22.
   - numpy<2.0
   - plotnine
   - pyctcdecode
