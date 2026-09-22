@@ -3,7 +3,6 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11.*
-  - accelerate>=0.26
   - datasets=3.*
   - evaluate
   - hydra-core=1.*
@@ -42,6 +41,15 @@ dependencies:
     # and torch 2.14.0 coexist in a working environment, so the version numbers
     # are decoupled and pinning torch does not constrain this transitively.
     - torchaudio
+    # Installed through pip rather than conda on purpose. conda-forge's
+    # `accelerate` hard-requires `pytorch>=2.0.0`, so listing it as a conda
+    # dependency pulls a conda `pytorch` + `libtorch` pair -- a CPU build --
+    # which pip then displaces when it installs torch above, leaving ~225 MB
+    # of orphaned CPU `libtorch` libraries behind (measured in the existing
+    # `asr` environment) and, on a GPU node, a CPU libtorch on the library
+    # path beside pip torch's own bundled copy. `accelerate` is the only
+    # conda dependency that pulls pytorch; transformers and datasets do not.
+    - accelerate>=0.26
     - kenlm
     - soundfile
     - deepfocus
