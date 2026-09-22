@@ -37,8 +37,11 @@ dependencies:
   - pip:
     # The artifact-caching base layer, shared with the LAPT repository rather
     # than hand-copied into src/artifact_configs.py as it used to be. Depending
-    # on lapt-core rather than lapt is deliberate: lapt pins
-    # transformers>=4.57,<4.58, which would conflict with the >=4.40,<5 above.
+    # on lapt-core rather than lapt is deliberate: `lapt` would drag in torch,
+    # hydra, sacrebleu and deepfocus that nothing here calls, and LAPT's own
+    # project branches pin exact versions (gothic pins transformers 4.57.1)
+    # that this fork has no reason to inherit. lapt-core pins nothing but
+    # PyYAML.
     # Pin a tag, never a branch -- the cache paths this package produces have to
     # be reproducible.
     #
