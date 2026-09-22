@@ -4,10 +4,18 @@ import json
 import os
 import tempfile
 
-# numpy must be imported before torch: on macOS the two ship separate copies of
-# libomp, and initializing torch's first aborts the interpreter. Importing it
-# here means any test module can be run on its own, in any import order.
-import numpy  # noqa: F401
+# scikit-learn must be imported before torch. On macOS this environment carries
+# three copies of libomp -- conda's (via llvm-openmp), torch's bundled one, and
+# scikit-learn's in sklearn/.dylibs -- and `import torch` on its own
+# initializes two of them, aborting the interpreter with OMP Error #15.
+# Loading sklearn's copy first makes torch reuse it instead.
+#
+# This guard previously imported numpy, which does not work: numpy does not
+# eagerly load a libomp, so the guard never took effect and the suite aborted
+# anyway. Measured on 2026-09-22 -- of numpy, scipy, soxr, librosa and numba,
+# only sklearn prevents the abort. scikit-learn is guaranteed present as a
+# librosa dependency (librosa requires scikit-learn>=1.1.0).
+import sklearn  # noqa: F401
 import pytest
 from omegaconf import OmegaConf
 
