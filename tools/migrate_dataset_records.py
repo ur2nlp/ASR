@@ -133,7 +133,13 @@ def plan_for(cache_dir: str, source_config: dict, seed: int) -> dict:
         return {"status": "no-data", "detail": "", **blank}
 
     dropped = [key for key in DROPPED_FIELDS if key in source_config]
-    assumed = [key for key in ASSUMED_FIELDS if key not in source_config]
+    # Only fields the target record actually carries can be "assumed": a source
+    # type that does not key on columns at all (`paired`) leaves them out of
+    # `config()` entirely, and reporting them as assumed-None would be noise.
+    assumed = [
+        key for key in ASSUMED_FIELDS
+        if key not in source_config and key in record
+    ]
 
     existing = read_record(config_path)
     if existing is not None:

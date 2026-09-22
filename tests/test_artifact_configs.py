@@ -146,6 +146,63 @@ class TestUntokenizedRecord:
             assert yaml.safe_load(config_file) == record
 
 
+class TestPairedDoesNotKeyOnColumnNames:
+    """Regression guard for the mirror image of the preprocessing bug.
+
+    Every other source keys its cache on `audio_column`/`text_column`, and
+    rightly so: those name the columns the data arrives with, and `_standardize`
+    renames them before the cache is written. A paired corpus has no incoming
+    column names -- `build_paired_split` invents `audio`/`transcription` from
+    file stems -- so recording them keyed the cache on something that could not
+    change its contents. Harmless in direction (it forces a rebuild rather than
+    reusing stale data) but it made a no-op setting look load-bearing.
+    """
+
+    def _paired_config(self, **overrides):
+        config = {"type": "paired", "path": "/data/corpus"}
+        config.update(overrides)
+        return config
+
+    def test_record_omits_the_column_names(self):
+        record = source_config_record(self._paired_config())
+        assert "audio_column" not in record
+        assert "text_column" not in record
+
+    def test_record_still_keys_what_does_matter(self):
+        record = source_config_record(self._paired_config())
+        assert record["type"] == "paired"
+        assert record["path"] == "/data/corpus"
+        assert record["audio_ext"] == ".wav"
+        assert record["transcript_ext"] == ".txt"
+        assert record["recursive"] is False
+
+    def test_changing_a_column_name_does_not_invalidate_the_cache(self):
+        baseline = source_config_record(self._paired_config())
+        renamed = source_config_record(
+            self._paired_config(audio_column="wav", text_column="text")
+        )
+        assert baseline == renamed
+
+    def test_changing_an_extension_does_invalidate_the_cache(self):
+        baseline = source_config_record(self._paired_config())
+        other = source_config_record(self._paired_config(audio_ext=".flac"))
+        assert baseline != other
+
+    def test_a_non_default_column_name_warns(self, capsys):
+        source_config_record(self._paired_config(audio_column="wav"))
+        assert "has no effect on a 'paired' source" in capsys.readouterr().err
+
+    def test_inherited_defaults_do_not_warn(self):
+        import io as _io
+        import contextlib
+        stderr = _io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            source_config_record(
+                self._paired_config(audio_column="audio", text_column="transcription")
+            )
+        assert stderr.getvalue() == ""
+
+
 class TestPreprocessingIsRecordedOnTheStageItAffects:
     """Regression guard for a mis-stated dependency.
 

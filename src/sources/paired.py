@@ -50,14 +50,25 @@ class PairedDataset(AudioSourceArtifact):
         self.recursive = recursive
 
     def config(self) -> dict:
-        """Return the parameters this cache is keyed on."""
+        """Return the parameters this cache is keyed on.
+
+        Deliberately omits `audio_column` / `text_column`, which every other
+        source merges in via `column_config()`. Those name the columns a source
+        *arrives* with, so that `_standardize` can rename them before the cache
+        is written -- real cache-keying inputs for `huggingface` and
+        `audiofolder`, whose contents carry whatever names the upstream data
+        used. A paired corpus has no such names: it is `{stem}.wav` beside
+        `{stem}.txt`, and `build_paired_split` invents `audio` and
+        `transcription` itself. The rename is therefore always a no-op here,
+        and recording the fields would key the cache on something that cannot
+        change its contents -- forcing a rebuild that reproduces identical bytes.
+        """
         return {
             "type": "paired",
             "path": self.source_path,
             "audio_ext": self.audio_ext,
             "transcript_ext": self.transcript_ext,
             "recursive": self.recursive,
-            **self.column_config(),
         }
 
     def load(self) -> DatasetDict:
@@ -107,14 +118,35 @@ class PairedDataset(AudioSourceArtifact):
             The configured source.
         """
         get = source_config.get
+        audio_column = get("audio_column", "audio")
+        text_column = get("text_column", "transcription")
+
+        # Warn only on a non-default value. The merged Hydra config always
+        # carries these (configs/main.yaml supplies them), so their presence
+        # cannot distinguish a deliberate override from an inherited default --
+        # but a value other than the standard one can only have been set on
+        # purpose, and on a paired corpus it does nothing.
+        for field, value, standard in (
+            ("audio_column", audio_column, "audio"),
+            ("text_column", text_column, "transcription"),
+        ):
+            if value != standard:
+                print(
+                    f"Warning: dataset.{field}={value!r} has no effect on a "
+                    f"'paired' source -- its columns are built from file stems, "
+                    f"not read from the data, and are always named "
+                    f"'audio'/'transcription'.",
+                    file=sys.stderr,
+                )
+
         return cls(
             cache_dir,
             path=source_config["path"],
             audio_ext=get("audio_ext", ".wav"),
             transcript_ext=get("transcript_ext", ".txt"),
             recursive=get("recursive", False),
-            audio_column=get("audio_column", "audio"),
-            text_column=get("text_column", "transcription"),
+            audio_column=audio_column,
+            text_column=text_column,
         )
 
 
