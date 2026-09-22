@@ -1,153 +1,42 @@
 """Artifact configuration tracking for reproducibility.
 
-Ports LAPT's ArtifactConfig pattern: each pipeline stage saves its
-configuration to YAML, and subsequent runs verify that cached artifacts
-match the current config. Mismatches produce clear error messages with
-remediation instructions.
+Each pipeline stage saves its configuration to YAML, and subsequent runs
+verify that cached artifacts match the current config. Mismatches produce
+clear error messages with remediation instructions.
+
+The base layer -- `ArtifactConfig`, `dict_diff`, `format_number` -- is not
+defined here. It comes from `lapt-core`, a standalone distribution shared with
+the LAPT repository, so the two projects cannot drift apart the way a
+hand-copied version did. What stays in this module is the part that is
+genuinely ASR's: the concrete config classes, and the audio-specific cache
+naming they depend on.
+
+`ArtifactConfig`, `dict_diff` and `format_number` are re-exported so that
+existing `from src.artifact_configs import ...` call sites keep working.
 """
 
 import os
 import sys
 
-import yaml
 from dataclasses import asdict, dataclass, field
+from lapt_core.artifacts import ArtifactConfig, dict_diff, format_number
 from omegaconf import DictConfig, OmegaConf
 
-
-# ---------------------------------------------------------------------------
-# Recursive dict comparison
-# ---------------------------------------------------------------------------
-
-def _dict_diff(dict1: dict, dict2: dict, path: str = "") -> list[str]:
-    """Recursively compare two dicts and return human-readable diffs."""
-    diffs = []
-
-    keys1 = set(dict1.keys())
-    keys2 = set(dict2.keys())
-
-    for key in sorted(keys1 - keys2):
-        full_path = f"{path}.{key}" if path else key
-        diffs.append(f"{full_path}: present in cached but not in current")
-
-    for key in sorted(keys2 - keys1):
-        full_path = f"{path}.{key}" if path else key
-        diffs.append(f"{full_path}: present in current but not in cached")
-
-    for key in sorted(keys1 & keys2):
-        val1, val2 = dict1[key], dict2[key]
-        full_path = f"{path}.{key}" if path else key
-
-        if isinstance(val1, dict) and isinstance(val2, dict):
-            diffs.extend(_dict_diff(val1, val2, full_path))
-        elif val1 != val2:
-            diffs.append(f"{full_path}: {val1} (cached) != {val2} (current)")
-
-    return diffs
-
-
-# ---------------------------------------------------------------------------
-# Base class
-# ---------------------------------------------------------------------------
-
-class ArtifactConfig:
-    """Base class for artifact configuration tracking."""
-
-    artifact_name: str = "Artifact"
-
-    def to_dict(self) -> dict:
-        raise NotImplementedError
-
-    def save(self, config_path: str) -> None:
-        """Write config to YAML for later verification."""
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        with open(config_path, "w") as f:
-            yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
-        print(f"Saved {self.artifact_name} config to {config_path}", file=sys.stderr)
-
-    def check_cached(self, config_path: str, error_on_mismatch: bool = True) -> bool:
-        """Verify that a cached config matches the current one.
-
-        Args:
-            config_path: Path to the cached YAML config.
-            error_on_mismatch: If True, raise ValueError on mismatch.
-
-        Returns:
-            True if configs match or no cached config exists.
-        """
-        if not os.path.exists(config_path):
-            return True
-
-        with open(config_path, "r") as f:
-            cached_config = yaml.safe_load(f)
-
-        diffs = _dict_diff(cached_config, self.to_dict())
-        if not diffs:
-            return True
-
-        diff_str = "\n  ".join(diffs)
-        error_msg = (
-            f"\n{'=' * 70}\n"
-            f"CONFIG MISMATCH: {self.artifact_name}\n"
-            f"{'=' * 70}\n"
-            f"Differences:\n  {diff_str}\n\n"
-            f"The cached artifact at {config_path} was built with different settings.\n"
-            f"To rebuild, delete the cache directory or set the appropriate fresh_* flag.\n"
-            f"{'=' * 70}"
-        )
-
-        if error_on_mismatch:
-            raise ValueError(error_msg)
-
-        print(error_msg, file=sys.stderr)
-        return False
+__all__ = [
+    "ArtifactConfig",
+    "FocusTokenizerConfig",
+    "ModelConfig",
+    "ProcessedDatasetConfig",
+    "dict_diff",
+    "format_number",
+    "processed_cache_dirname",
+    "warn_on_legacy_processed_cache",
+]
 
 
 # ---------------------------------------------------------------------------
 # Concrete config classes
 # ---------------------------------------------------------------------------
-
-class DatasetConfig(ArtifactConfig):
-    """Tracks configuration for the untokenized dataset stage."""
-
-    artifact_name = "Untokenized Dataset"
-
-    def __init__(self, config: dict):
-        self._config = config
-
-    @classmethod
-    def from_args(cls, args: DictConfig) -> "DatasetConfig":
-        config = {
-            "type": args.dataset.type,
-            "id": args.dataset.id,
-            "seed": args.seed,
-        }
-
-        dataset_type = args.dataset.type
-        if dataset_type == "paired":
-            config["path"] = args.dataset.path
-            config["audio_ext"] = args.dataset.get("audio_ext", ".wav")
-            config["transcript_ext"] = args.dataset.get("transcript_ext", ".txt")
-            config["recursive"] = args.dataset.get("recursive", False)
-        elif dataset_type == "audiofolder":
-            config["path"] = args.dataset.path
-        elif dataset_type == "huggingface":
-            config["name"] = args.dataset.name
-            config["config"] = getattr(args.dataset, "config", None)
-        elif dataset_type == "concat":
-            config["sources"] = OmegaConf.to_container(
-                args.dataset.sources, resolve=True
-            )
-
-        # include preprocessing config since it affects cached data
-        config["preprocessing"] = OmegaConf.to_container(
-            args.preprocessing, resolve=True
-        )
-
-        return cls(config)
-
-    def to_dict(self) -> dict:
-        return dict(self._config)
-
 
 @dataclass
 class ProcessedDatasetConfig(ArtifactConfig):
@@ -161,6 +50,13 @@ class ProcessedDatasetConfig(ArtifactConfig):
     max_audio_length_seconds: float | None
     vocab_size: int
     max_label_length: int | None = None
+    # Text normalization settings. These belong here, not on the untokenized
+    # stage: that cache is written from the raw source before `normalize_dataset`
+    # runs, so preprocessing cannot change its contents -- while this cache holds
+    # label-encoded transcripts, which it changes completely. Recording it on the
+    # wrong stage meant a preprocessing change hard-failed a cache it could not
+    # affect, and was then invisible to the cache it did.
+    preprocessing: dict | None = None
     # Only meaningful for multilingual seq2seq models, where they change the
     # special tokens prefixed to every encoded transcript and therefore the
     # cached labels.
@@ -182,6 +78,7 @@ class ProcessedDatasetConfig(ArtifactConfig):
             max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
             vocab_size=vocab_size,
             max_label_length=args.dataset.get("max_label_length"),
+            preprocessing=OmegaConf.to_container(args.preprocessing, resolve=True),
             language=args.model.get("language"),
             task=args.model.get("task"),
             focus_tokenizer_id=tokenizer_id(args) if focus_is_enabled(args) else None,
@@ -194,19 +91,6 @@ class ProcessedDatasetConfig(ArtifactConfig):
 # ---------------------------------------------------------------------------
 # FOCUS vocabulary replacement
 # ---------------------------------------------------------------------------
-
-def format_number(value: int) -> str:
-    """Render a count compactly for a directory name: 4096 -> '4k'.
-
-    Truncating rather than rounding keeps the mapping deterministic, which
-    matters because the result is a cache-path component.
-    """
-    if value >= 1_000_000:
-        return f"{value // 1_000_000}m"
-    if value >= 1000:
-        return f"{value // 1000}k"
-    return str(value)
-
 
 @dataclass
 class FocusTokenizerConfig(ArtifactConfig):

@@ -14,7 +14,6 @@ from omegaconf import DictConfig, OmegaConf
 from transformers.trainer_utils import get_last_checkpoint
 
 from src.artifact_configs import (
-    DatasetConfig,
     ProcessedDatasetConfig,
     processed_cache_dirname,
     warn_on_legacy_processed_cache,
@@ -346,15 +345,14 @@ def main(args: DictConfig) -> None:
     warn_on_legacy_processed_cache(cache_dir)
 
     # --- Stage 1: Load and normalize dataset ---
-    dataset_config = DatasetConfig.from_args(args)
-    dataset_config_path = os.path.join(cache_dir, "dataset_config.yaml")
-    dataset_config.check_cached(dataset_config_path)
-
-    dataset = load_dataset_from_config(args.dataset, cache_dir)
+    # The cache check, config record and write belong to the artifact layer now:
+    # each source in `src/sources/` declares what its cache is keyed on, and
+    # `resolve()` does the rest. Normalization and splitting stay outside it
+    # deliberately -- neither is persisted here, so neither may key this cache.
+    dataset = load_dataset_from_config(args.dataset, cache_dir, seed=args.seed)
     dataset = normalize_dataset(dataset, args.preprocessing)
     dataset = ensure_train_dev_split(dataset, args.dataset.dev_size, seed=args.seed)
 
-    dataset_config.save(dataset_config_path)
     print(f"Dataset splits: {dict(dataset.num_rows)}", file=sys.stderr)
 
     # --- Stage 2: Build tokenizer and processor ---

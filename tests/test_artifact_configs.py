@@ -1,4 +1,11 @@
-"""Tests for src/artifact_configs.py."""
+"""Tests for src/artifact_configs.py.
+
+`dict_diff` and `ArtifactConfig` now come from `lapt-core` and are imported
+through `src.artifact_configs`, which re-exports them. These tests are kept
+pointed at that re-export deliberately: they cover the behaviour ASR depends
+on, from the angle ASR consumes it, and would still catch a bad upgrade of the
+shared package.
+"""
 
 import os
 
@@ -7,12 +14,12 @@ import yaml
 
 from omegaconf import OmegaConf
 
+from src.sources import source_config_record
 from src.artifact_configs import (
     ArtifactConfig,
-    DatasetConfig,
     ModelConfig,
     ProcessedDatasetConfig,
-    _dict_diff,
+    dict_diff,
     processed_cache_dirname,
     warn_on_legacy_processed_cache,
 )
@@ -20,25 +27,25 @@ from src.artifact_configs import (
 
 class TestDictDiff:
     def test_identical_dicts(self):
-        assert _dict_diff({"a": 1}, {"a": 1}) == []
+        assert dict_diff({"a": 1}, {"a": 1}) == []
 
     def test_value_difference(self):
-        diffs = _dict_diff({"a": 1}, {"a": 2})
+        diffs = dict_diff({"a": 1}, {"a": 2})
         assert len(diffs) == 1
         assert "a" in diffs[0]
 
     def test_missing_key(self):
-        diffs = _dict_diff({"a": 1, "b": 2}, {"a": 1})
+        diffs = dict_diff({"a": 1, "b": 2}, {"a": 1})
         assert len(diffs) == 1
         assert "cached" in diffs[0]
 
     def test_extra_key(self):
-        diffs = _dict_diff({"a": 1}, {"a": 1, "b": 2})
+        diffs = dict_diff({"a": 1}, {"a": 1, "b": 2})
         assert len(diffs) == 1
         assert "current" in diffs[0]
 
     def test_nested_diff(self):
-        diffs = _dict_diff(
+        diffs = dict_diff(
             {"a": {"b": 1}},
             {"a": {"b": 2}},
         )
@@ -46,7 +53,7 @@ class TestDictDiff:
         assert "a.b" in diffs[0]
 
     def test_empty_dicts(self):
-        assert _dict_diff({}, {}) == []
+        assert dict_diff({}, {}) == []
 
 
 class TestArtifactConfigSaveAndCheck:
@@ -118,18 +125,116 @@ class TestArtifactConfigSaveAndCheck:
         assert config2.check_cached(path, error_on_mismatch=False) is False
 
 
-class TestDatasetConfig:
-    def test_from_args(self, base_config):
-        config = DatasetConfig.from_args(base_config)
-        d = config.to_dict()
-        assert d["type"] == "huggingface"
-        assert d["id"] == "test_lang"
+class TestUntokenizedRecord:
+    """What the untokenized stage records, now that the source artifact owns it.
+
+    `DatasetConfig` is gone: each source in `src/sources/` declares its own
+    `config()`, which is both the cache key and the saved record.
+    """
+
+    def test_names_the_type_and_the_source(self, base_config):
+        record = source_config_record(base_config.dataset, base_config.seed)
+        assert record["type"] == "huggingface"
+        assert record["name"] == "test_dataset"
 
     def test_round_trip(self, tmp_dir, base_config):
-        config = DatasetConfig.from_args(base_config)
-        path = os.path.join(tmp_dir, "dataset.yaml")
-        config.save(path)
-        assert config.check_cached(path) is True
+        record = source_config_record(base_config.dataset, base_config.seed)
+        path = os.path.join(tmp_dir, "config.yaml")
+        with open(path, "w") as config_file:
+            yaml.dump(record, config_file)
+        with open(path) as config_file:
+            assert yaml.safe_load(config_file) == record
+
+
+class TestPairedDoesNotKeyOnColumnNames:
+    """Regression guard for the mirror image of the preprocessing bug.
+
+    Every other source keys its cache on `audio_column`/`text_column`, and
+    rightly so: those name the columns the data arrives with, and `_standardize`
+    renames them before the cache is written. A paired corpus has no incoming
+    column names -- `build_paired_split` invents `audio`/`transcription` from
+    file stems -- so recording them keyed the cache on something that could not
+    change its contents. Harmless in direction (it forces a rebuild rather than
+    reusing stale data) but it made a no-op setting look load-bearing.
+    """
+
+    def _paired_config(self, **overrides):
+        config = {"type": "paired", "path": "/data/corpus"}
+        config.update(overrides)
+        return config
+
+    def test_record_omits_the_column_names(self):
+        record = source_config_record(self._paired_config())
+        assert "audio_column" not in record
+        assert "text_column" not in record
+
+    def test_record_still_keys_what_does_matter(self):
+        record = source_config_record(self._paired_config())
+        assert record["type"] == "paired"
+        assert record["path"] == "/data/corpus"
+        assert record["audio_ext"] == ".wav"
+        assert record["transcript_ext"] == ".txt"
+        assert record["recursive"] is False
+
+    def test_changing_a_column_name_does_not_invalidate_the_cache(self):
+        baseline = source_config_record(self._paired_config())
+        renamed = source_config_record(
+            self._paired_config(audio_column="wav", text_column="text")
+        )
+        assert baseline == renamed
+
+    def test_changing_an_extension_does_invalidate_the_cache(self):
+        baseline = source_config_record(self._paired_config())
+        other = source_config_record(self._paired_config(audio_ext=".flac"))
+        assert baseline != other
+
+    def test_a_non_default_column_name_warns(self, capsys):
+        source_config_record(self._paired_config(audio_column="wav"))
+        assert "has no effect on a 'paired' source" in capsys.readouterr().err
+
+    def test_inherited_defaults_do_not_warn(self):
+        import io as _io
+        import contextlib
+        stderr = _io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            source_config_record(
+                self._paired_config(audio_column="audio", text_column="transcription")
+            )
+        assert stderr.getvalue() == ""
+
+
+class TestPreprocessingIsRecordedOnTheStageItAffects:
+    """Regression guard for a mis-stated dependency.
+
+    The untokenized cache is written from the raw source *before*
+    `normalize_dataset` runs, so text normalization cannot change it. The
+    processed cache holds label-encoded transcripts, so normalization changes
+    it completely. Recording it on the untokenized stage meant a preprocessing
+    change hard-failed a cache it could not affect, while the cache it did
+    affect was reused silently -- `ProcessedDatasetConfig` did not track it and
+    `processed_cache_dirname` did not either, so nothing noticed.
+    """
+
+    def test_untokenized_record_ignores_preprocessing(self, base_config):
+        other = base_config.copy()
+        other.preprocessing.remove_punctuation = not base_config.preprocessing.remove_punctuation
+
+        assert source_config_record(base_config.dataset, base_config.seed) == \
+            source_config_record(other.dataset, other.seed)
+
+    def test_untokenized_record_ignores_seed(self, base_config):
+        other = base_config.copy()
+        other.seed = base_config.seed + 1
+
+        assert source_config_record(base_config.dataset, base_config.seed) == \
+            source_config_record(other.dataset, other.seed)
+
+    def test_processed_record_tracks_preprocessing(self, base_config):
+        other = base_config.copy()
+        other.preprocessing.remove_punctuation = not base_config.preprocessing.remove_punctuation
+
+        assert ProcessedDatasetConfig.from_args(base_config, 32).to_dict() != \
+            ProcessedDatasetConfig.from_args(other, 32).to_dict()
 
 
 class TestProcessedDatasetConfig:

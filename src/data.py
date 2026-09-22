@@ -1,19 +1,19 @@
-"""Dataset dispatcher and two-stage preparation pipeline.
+"""Dataset loading and the two-stage preparation pipeline.
 
-Provides a type-dispatching loader (paired, audiofolder, huggingface, concat)
-that produces standardized {audio, transcription} datasets, a two-stage
-preparation pipeline (text normalization → feature extraction + label
-encoding), and runtime loading of external held-out eval sets.
+The per-type loaders live in `src/sources/`, one `DatasetArtifact` subclass per
+dataset type; this module keeps the boundary that resolves one
+(`load_dataset_from_config`), the two-stage preparation pipeline (text
+normalization → feature extraction + label encoding), and runtime loading of
+external held-out eval sets.
 
 The data collators live in `src/collators.py`; they are re-exported here for
 callers that imported them from this module.
 """
 
-import glob
 import os
 import sys
 
-from datasets import Audio, Dataset, DatasetDict, concatenate_datasets, load_dataset
+from datasets import Audio, Dataset, DatasetDict
 from omegaconf import DictConfig
 from transformers import ProcessorMixin
 
@@ -23,6 +23,8 @@ from src.collators import (
 )
 from src.preprocessing import build_text_normalizer
 from src.processors import get_model_spec
+from src.sources import make_source
+from src.sources.paired import build_paired_split
 
 __all__ = [
     "DataCollatorCTCWithPadding",
@@ -36,237 +38,44 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Dataset dispatcher
+# Dataset loading
 # ---------------------------------------------------------------------------
 
 def load_dataset_from_config(
     dataset_config: DictConfig,
     cache_dir: str,
+    seed: int = 1,
+    fresh: bool = False,
 ) -> DatasetDict:
-    """Load a dataset based on the config's `type` field.
+    """Load the dataset a config describes, from cache when one is valid.
 
-    All loaders produce a DatasetDict with standardized columns:
-    {audio: Audio(...), transcription: str}.
+    The loaders themselves are `DatasetArtifact` subclasses in `src/sources/`,
+    one per `type`, each declaring the parameters its cache is keyed on. This
+    function is the boundary: it turns a config into an artifact and resolves
+    it. The cache check, the config record and the write are the artifact
+    layer's, not this module's.
+
+    The record lives at `<cache_dir>/untokenized/config.yaml`, inside the
+    directory it describes. Caches written before the port keep their record
+    *beside* that directory, as `<cache_dir>/dataset_config.yaml`, and are
+    refused until `tools/migrate_dataset_records.py` has moved them.
 
     Args:
         dataset_config: The `dataset` section of the Hydra config.
-        cache_dir: Directory for caching the untokenized dataset.
+        cache_dir: Directory the `untokenized` subdirectory is created in.
+        seed: Global random seed, passed to sources that sample.
+        fresh: Rebuild even if a valid cache exists.
 
     Returns:
-        A HuggingFace DatasetDict with at least a 'train' split.
-    """
-    untokenized_path = os.path.join(cache_dir, "untokenized")
-    if os.path.exists(untokenized_path):
-        print(f"Loading cached untokenized dataset from {untokenized_path}", file=sys.stderr)
-        return DatasetDict.load_from_disk(untokenized_path)
-
-    dataset_type = dataset_config.type
-    if dataset_type == "paired":
-        dataset = _load_paired(dataset_config)
-    elif dataset_type == "audiofolder":
-        dataset = load_dataset("audiofolder", data_dir=dataset_config.path)
-    elif dataset_type == "huggingface":
-        dataset = _load_huggingface(dataset_config)
-    elif dataset_type == "concat":
-        dataset = _load_concat(dataset_config, cache_dir)
-    else:
-        raise ValueError(
-            f"Unsupported dataset type: {dataset_type}. "
-            f"Available: paired, audiofolder, huggingface, concat"
-        )
-
-    dataset = _standardize_columns(dataset, dataset_config)
-
-    os.makedirs(untokenized_path, exist_ok=True)
-    dataset.save_to_disk(untokenized_path)
-    print(f"Saved untokenized dataset to {untokenized_path}", file=sys.stderr)
-    return dataset
-
-
-
-def _load_paired(config: DictConfig) -> DatasetDict:
-    """Load a corpus of matched audio/transcript files.
-
-    Each audio file (e.g. ``utt001.wav``) is paired with a sibling text file of
-    the same stem (``utt001.txt``) containing its transcription. This is the
-    common layout for field-collected and manually transcribed speech data.
-
-    Two directory layouts are supported:
-      - Pre-split: if ``path`` contains any of ``train/``, ``dev/``, ``test/``
-        subdirectories, each is loaded as the corresponding split.
-      - Flat: otherwise, all pairs directly under ``path`` are loaded into a
-        single ``train`` split (a dev split is carved out later via
-        ``dev_size``).
-
-    Args:
-        config: The `dataset` section of the Hydra config. Reads ``path`` and,
-            optionally, ``audio_ext`` (default ``.wav``), ``transcript_ext``
-            (default ``.txt``), and ``recursive`` (default ``False``).
-
-    Returns:
-        A DatasetDict with an ``audio`` column (cast to the Audio feature) and
-        a ``transcription`` column.
-    """
-    root = config.path
-    if not os.path.isdir(root):
-        raise FileNotFoundError(
-            f"Paired dataset path does not exist or is not a directory: {root}"
-        )
-
-    audio_ext = config.get("audio_ext", ".wav")
-    transcript_ext = config.get("transcript_ext", ".txt")
-    recursive = config.get("recursive", False)
-
-    split_subdirs = [
-        name for name in ("train", "dev", "test")
-        if os.path.isdir(os.path.join(root, name))
-    ]
-
-    if split_subdirs:
-        splits = {
-            name: _build_paired_split(
-                os.path.join(root, name), audio_ext, transcript_ext, recursive
-            )
-            for name in split_subdirs
-        }
-        return DatasetDict(splits)
-
-    train_split = _build_paired_split(root, audio_ext, transcript_ext, recursive)
-    return DatasetDict({"train": train_split})
-
-
-def _build_paired_split(
-    directory: str,
-    audio_ext: str,
-    transcript_ext: str,
-    recursive: bool,
-) -> Dataset:
-    """Build a single Dataset split from a directory of audio/transcript pairs.
-
-    Args:
-        directory: Directory to search for audio files.
-        audio_ext: Audio file extension to match (e.g. ``.wav``).
-        transcript_ext: Transcript file extension (e.g. ``.txt``).
-        recursive: Whether to search subdirectories recursively.
-
-    Returns:
-        A Dataset with ``audio`` (cast to the Audio feature) and
-        ``transcription`` columns.
+        A `DatasetDict` with standardized `{audio, transcription}` columns and
+        at least a `train` split.
 
     Raises:
-        FileNotFoundError: If no audio files or no complete pairs are found.
+        ValueError: If no source type is registered under the config's `type`.
+        MissingConfigRecordError: If a cached dataset carries no config record.
+        ConfigMismatchError: If a cached dataset was built with other settings.
     """
-    if recursive:
-        pattern = os.path.join(directory, "**", f"*{audio_ext}")
-        audio_paths = sorted(glob.glob(pattern, recursive=True))
-    else:
-        pattern = os.path.join(directory, f"*{audio_ext}")
-        audio_paths = sorted(glob.glob(pattern))
-
-    if not audio_paths:
-        raise FileNotFoundError(
-            f"No '*{audio_ext}' files found in {directory} "
-            f"(recursive={recursive})."
-        )
-
-    audio_files: list[str] = []
-    transcriptions: list[str] = []
-    missing_transcripts: list[str] = []
-
-    for audio_path in audio_paths:
-        transcript_path = os.path.splitext(audio_path)[0] + transcript_ext
-        if not os.path.isfile(transcript_path):
-            missing_transcripts.append(audio_path)
-            continue
-        with open(transcript_path, encoding="utf-8") as transcript_file:
-            transcription = transcript_file.read().strip()
-        audio_files.append(audio_path)
-        transcriptions.append(transcription)
-
-    if missing_transcripts:
-        preview = ", ".join(os.path.basename(path) for path in missing_transcripts[:3])
-        print(
-            f"Warning: skipped {len(missing_transcripts)} audio file(s) in "
-            f"{directory} with no matching '{transcript_ext}' (e.g. {preview})",
-            file=sys.stderr,
-        )
-
-    if not audio_files:
-        raise FileNotFoundError(
-            f"Found {len(audio_paths)} '*{audio_ext}' file(s) in {directory} "
-            f"but none had a matching '*{transcript_ext}' transcript."
-        )
-
-    dataset = Dataset.from_dict(
-        {"audio": audio_files, "transcription": transcriptions}
-    )
-    dataset = dataset.cast_column("audio", Audio())
-    print(
-        f"Loaded {len(audio_files)} audio/transcript pair(s) from {directory}",
-        file=sys.stderr,
-    )
-    return dataset
-
-
-def _load_huggingface(config: DictConfig) -> DatasetDict:
-    """Load a dataset from the HuggingFace Hub.
-
-    Note on naming: load_dataset()'s `path` argument is the Hub dataset
-    identifier (e.g. "mozilla-foundation/common_voice_16_1"), and its `name`
-    argument is the subset/config (e.g. "zu"). We call these `name` and
-    `config` in our YAML to avoid the confusion of calling a dataset identifier
-    a "path".
-    """
-    kwargs = {"path": config.name}
-    if hasattr(config, "config") and config.config is not None:
-        # load_dataset calls this "name"; it is the dataset subset/config
-        kwargs["name"] = config.config
-    if hasattr(config, "split") and config.split is not None:
-        kwargs["split"] = config.split
-    if hasattr(config, "trust_remote_code"):
-        kwargs["trust_remote_code"] = config.trust_remote_code
-
-    result = load_dataset(**kwargs)
-    if isinstance(result, Dataset):
-        return DatasetDict({"train": result})
-    return result
-
-
-def _load_concat(config: DictConfig, parent_cache_dir: str) -> DatasetDict:
-    """Concatenate multiple dataset sources via recursive dispatch."""
-    sources = config.sources
-    splits: dict[str, list] = {}
-
-    for idx, source_config in enumerate(sources):
-        source_config = DictConfig(source_config)
-        source_id = source_config.get("id", f"source_{idx}")
-        source_cache = os.path.join(parent_cache_dir, source_id)
-
-        source_dataset = load_dataset_from_config(source_config, source_cache)
-        for split_name, split_data in source_dataset.items():
-            splits.setdefault(split_name, []).append(split_data)
-
-    return DatasetDict({
-        split_name: concatenate_datasets(split_list)
-        for split_name, split_list in splits.items()
-    })
-
-
-def _standardize_columns(dataset: DatasetDict, config: DictConfig) -> DatasetDict:
-    """Rename columns to {audio, transcription} and cast audio."""
-    audio_col = config.get("audio_column", "audio")
-    text_col = config.get("text_column", "transcription")
-
-    for split_name in dataset:
-        split = dataset[split_name]
-        columns = split.column_names
-
-        if audio_col != "audio" and audio_col in columns:
-            dataset[split_name] = split.rename_column(audio_col, "audio")
-        if text_col != "transcription" and text_col in columns:
-            dataset[split_name] = dataset[split_name].rename_column(text_col, "transcription")
-
-    return dataset
+    return make_source(cache_dir, dataset_config, seed).resolve(fresh=fresh)
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +354,7 @@ def load_external_eval_sets(
                 f"is supported."
             )
 
-        dataset = _build_paired_split(
+        dataset = build_paired_split(
             entry.path,
             entry.get("audio_ext", ".wav"),
             entry.get("transcript_ext", ".txt"),

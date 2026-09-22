@@ -173,10 +173,18 @@ def embedding_hash(args: DictConfig) -> str:
     Returns:
         An 8-character hex digest.
     """
-    from src.artifact_configs import DatasetConfig
+    from src.sources import source_config_record
 
     keys = {
-        "data": DatasetConfig.from_args(args).to_dict(),
+        "data": source_config_record(args.dataset, args.seed),
+        "dataset_id": args.dataset.get("id"),
+        # The FOCUS corpus is built from *normalized* transcripts (see
+        # `__main__`, which passes them after `normalize_dataset`), so text
+        # normalization changes these embeddings and has to key them. It is
+        # named explicitly here because the dataset record no longer carries
+        # it: that record describes the untokenized cache, which is written
+        # before normalization and cannot be affected by it.
+        "preprocessing": OmegaConf.to_container(args.preprocessing, resolve=True),
         "num_samples": args.focus.get("num_samples"),
         "seed": args.seed,
         "pretrained_name": args.model.pretrained_name,
