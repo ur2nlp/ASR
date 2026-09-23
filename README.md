@@ -143,7 +143,7 @@ Runs are tracked by **experiment id** — the `experiment_id` from §2, which na
 both the output directory and every record below.
 
 ```bash
-python -m src dataset=zulu experiment_id=whisper15 training.learning_rate=1e-5
+python -m src dataset=<your_dataset> experiment_id=<your_run_id> training.learning_rate=1e-5
 ```
 
 Three files per run live under `outputs/`:
@@ -161,8 +161,8 @@ and copies only that. No host or path is baked into the repository, so set them
 in your shell:
 
 ```bash
-export ASR_REMOTE=my-cluster                    # ssh host, or an alias from ~/.ssh/config
-export ASR_MODEL_DIRS=/scratch/me/ASR/models    # colon-separated for several roots
+export ASR_REMOTE=<ssh_host_or_alias>          # e.g. a Host entry in ~/.ssh/config
+export ASR_MODEL_DIRS=<remote_models_dir>      # colon-separated for several roots
 ```
 
 ```bash
@@ -187,7 +187,9 @@ eval "$INV" | python -m tools.fetch_diff --dry-run
 updates rather than duplicates.
 
 ```bash
-python -m tools.registry extract outputs/configs/whisper15.yaml
+python -m tools.registry extract outputs/configs/<your_run_id>.yaml
+
+# --pattern takes a regex over paths; this takes every id starting with 'whisper'
 python -m tools.registry extract --pattern 'outputs/configs/whisper.*\.yaml'
 ```
 
@@ -197,10 +199,10 @@ because Whisper has no Zulu token and the config names a deliberate proxy. What
 only you can supply is why the run existed and what it showed:
 
 ```bash
-python -m tools.registry annotate whisper15 \
+python -m tools.registry annotate <your_run_id> \
     --note "whisper-small, FOCUS 4k, lr 1e-5, effective batch 32" \
     --observation "WER plateaus ~step 12k; dev loss still falling" \
-    --era focus --group vocab-sweep
+    --era <your_era> --group <your_group>
 ```
 
 `--status manually_closed` retires a run, which also stops `fetch_results.sh`
@@ -210,7 +212,7 @@ re-fetching it.
 
 ```bash
 python -m tools.registry show                       # everything
-python -m tools.registry show --era focus --group vocab-sweep
+python -m tools.registry show --era <your_era> --group <your_group>
 python -m tools.registry diff whisper5 whisper9     # only what differs
 python -m tools.registry verify                     # rows still match outputs/configs/
 python -m tools.registry debt                       # runs on disk with no row, rows with no note
@@ -218,7 +220,8 @@ python -m tools.registry debt                       # runs on disk with no row, 
 
 `diff` is the one to reach for when comparing a sweep — it prints only the
 parameters that vary and lists the rest as constant, so a forty-field config
-collapses to the handful you actually changed:
+collapses to the handful you actually changed. Run ids below are from this
+fork's own sweep, as an illustration of the output:
 
 ```
 Run       effective_batch  vocab_size  mask_time_prob
@@ -237,14 +240,14 @@ on a fetched mirror as well as on the local `models/` tree shown in §3.
 ```bash
 # one run, several metrics
 python -m tools.training_plot --metrics loss eval_wer eval_cer \
-    --state-file outputs/trainer_states/whisper15.json
+    --state-file outputs/trainer_states/<your_run_id>.json
 
-# compare runs; --state-pattern is a regex over paths
+# compare runs; --state-pattern is a regex over paths (ids here are examples)
 python -m tools.training_plot --metric eval_wer \
     --state-pattern "outputs/trainer_states/whisper(5|9)\.json"
 
 # discover what a run actually logged
-python -m tools.training_plot --list-metrics --state-file outputs/trainer_states/whisper15.json
+python -m tools.training_plot --list-metrics --state-file outputs/trainer_states/<your_run_id>.json
 ```
 
 Metric names are regexes, so with external eval sets (§2) `--metric "eval_.*_wer"`
