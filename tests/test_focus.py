@@ -104,6 +104,56 @@ class TestNamingAndPaths:
         whisper_config.model.short_name = "whisper_medium"
         assert focus.tokenizer_id(whisper_config) != small_id
 
+    def test_vocabulary_id_omits_the_model(self, whisper_config):
+        assert focus.vocabulary_id(whisper_config) == "focus-v512-unigram"
+
+    def test_tokenizer_id_is_the_vocabulary_id_plus_the_model(self, whisper_config):
+        assert focus.tokenizer_id(whisper_config).startswith(
+            focus.vocabulary_id(whisper_config)
+        )
+        assert "whisper-small" in focus.tokenizer_id(whisper_config)
+
+    def test_vocabulary_id_is_the_same_across_pretrained_models(self, whisper_config):
+        """The vocabulary does not change because the base checkpoint did.
+
+        `tokenizer_id` must still differ -- the special-token block is drawn from
+        the checkpoint -- which the test above this one covers.
+        """
+        small = focus.vocabulary_id(whisper_config)
+        whisper_config.model.pretrained_name = "openai/whisper-medium"
+        whisper_config.model.short_name = "whisper_medium"
+        assert focus.vocabulary_id(whisper_config) == small
+
+    def test_the_run_path_does_not_repeat_the_model(self, whisper_config):
+        """Regression guard for monstrous run directories.
+
+        The FOCUS suffix used to be the full `tokenizer_id`, which ends with the
+        model slug that `model_short` has already put earlier in the same path,
+        giving names like
+        `whisper-medium-zu_zulu_whisper_focus-v4k-whisper-medium-zu_...`.
+        """
+        from src.__main__ import _build_output_dir
+
+        whisper_config.output_dir = "models"
+        whisper_config.training.name = "basic"
+        whisper_config.experiment_id = "run1"
+
+        path = _build_output_dir(whisper_config)
+        leaf = os.path.basename(path)
+
+        assert leaf.count("whisper-small") + leaf.count("whisper_small") == 1
+        assert leaf == "whisper_small_basic_focus-v512-unigram_run1"
+
+    def test_the_run_path_still_separates_vocabularies(self, whisper_config):
+        """Dropping the model must not collapse two different vocabularies."""
+        from src.__main__ import _build_output_dir
+
+        whisper_config.output_dir = "models"
+        whisper_config.training.name = "basic"
+        first = _build_output_dir(whisper_config)
+        whisper_config.focus.vocab_size = 4096
+        assert _build_output_dir(whisper_config) != first
+
     def test_paths_rooted_in_cache_dir(self, whisper_config, tmp_dir):
         paths = focus.resolve_paths(whisper_config, tmp_dir)
         assert paths.tokenizer_dir.startswith(os.path.join(tmp_dir, "focus"))

@@ -88,23 +88,24 @@ def is_enabled(args: DictConfig) -> bool:
     return bool(focus is not None and focus.get("enabled", False))
 
 
-def tokenizer_id(args: DictConfig) -> str:
-    """Name the tokenizer artifact for this configuration.
+def vocabulary_id(args: DictConfig) -> str:
+    """Name the *vocabulary* this configuration produces, without the model.
 
-    Encodes the fields that change the *vocabulary*, plus the pretrained model
-    the special-token block and inherited tokenizer files
-    (`_copy_inherited_files`) are drawn from. Different checkpoints can carry
-    different special tokens (or none at all for a non-seq2seq base), so two
-    pretrained models never share a tokenizer directory -- each gets its own
-    cache and initializes independently rather than colliding on a config
-    mismatch. Everything else is caught by `FocusTokenizerConfig.check_cached`.
-    The FOCUS-embedding knobs are deliberately absent, so a change to them
-    reuses the tokenizer and only recomputes the embedding sidecar.
+    The fields that shape the vocabulary itself: size, algorithm, corpus sample
+    count and character coverage. Deliberately omits the pretrained model, which
+    `tokenizer_id` adds.
+
+    Use this where the model is already established by the surrounding context --
+    a run directory that is `{model_short}_{training}_...` does not need the
+    model repeated inside its FOCUS suffix. Using the full `tokenizer_id` there
+    produced names like
+    `whisper-medium-zu_zulu_whisper_focus-v4k-whisper-medium-zu_whisper-medium1`,
+    where the model appears twice and carries no information the second time.
 
     Returns:
-        A directory-safe name such as `focus-v4k-unigram-whisper-medium`.
+        A directory-safe name such as `focus-v4k-unigram`.
     """
-    from src.artifact_configs import _slugify, format_number
+    from src.artifact_configs import format_number
 
     parts = [f"focus-v{format_number(args.focus.vocab_size)}"]
 
@@ -120,10 +121,33 @@ def tokenizer_id(args: DictConfig) -> str:
     if float(coverage) != 1.0:
         parts.append(f"cc{str(coverage).replace('.', 'p')}")
 
-    model_short = args.model.get("short_name") or args.model.pretrained_name
-    parts.append(_slugify(model_short))
-
     return "-".join(parts)
+
+
+def tokenizer_id(args: DictConfig) -> str:
+    """Name the tokenizer artifact for this configuration.
+
+    `vocabulary_id` plus the pretrained model the special-token block and
+    inherited tokenizer files (`_copy_inherited_files`) are drawn from. Different
+    checkpoints can carry different special tokens (or none at all for a
+    non-seq2seq base), so two pretrained models never share a tokenizer directory
+    -- each gets its own cache and initializes independently rather than
+    colliding on a config mismatch. Everything else is caught by
+    `FocusTokenizerConfig.check_cached`. The FOCUS-embedding knobs are
+    deliberately absent, so a change to them reuses the tokenizer and only
+    recomputes the embedding sidecar.
+
+    The model stays in *this* name because tokenizer directories from different
+    base models sit side by side under one cache root with nothing else to tell
+    them apart.
+
+    Returns:
+        A directory-safe name such as `focus-v4k-unigram-whisper-medium`.
+    """
+    from src.artifact_configs import _slugify
+
+    model_short = args.model.get("short_name") or args.model.pretrained_name
+    return f"{vocabulary_id(args)}-{_slugify(model_short)}"
 
 
 def resolve_paths(args: DictConfig, cache_dir: str) -> FocusPaths:
