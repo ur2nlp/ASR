@@ -1,69 +1,24 @@
-# Whisper fine-tuning preset for the Zulu corpus (fork-specific).
-#
-# Deliberately mirrors training/zulu.yaml (the XLS-R CTC preset) so the two are
-# comparable: same corpus, same effective batch, same step budget, same
-# schedule, same regularization strength, same early-stopping behaviour. The
-# only deviations are where a CTC setting has no Whisper counterpart or would be
-# actively wrong for a seq2seq model, and each is called out below.
-#
-# Corpus (37361 prepared utterances, ~116 h at the measured 11.2 s mean):
-#   train/dev  33625 / 3736 after the 10% dev split
-#   ~1051 optimizer steps per epoch at effective batch 32
-#   max_steps 20000 -> ~19 epochs, matching the CTC preset's budget
-#   labels: mean 53 tokens, p95 91, max 123 measured on a 102-utterance sample
-#
-# SHARED WITH training/zulu.yaml:
-#   max_steps 20000, batch 16 x 2 accum (effective 32), gradient checkpointing,
-#   linear schedule with warmup_ratio 0.1, max_grad_norm 1.0, weight_decay 0.01,
-#   dropout 0.1, attention_dropout 0.1, mask_time_prob 0.05,
-#   mask_feature_prob 0.01, bf16, adamw_torch_fused, save_total_limit 2,
-#   early_stopping_patience 10, logging every max_steps/400.
-#
-# DEVIATIONS, and why each is forced:
-#   * learning_rate 1e-4 -> 1e-5. The one substantive difference, and it is not
-#     negotiable for a fair comparison: the CTC preset raises the rate because
-#     XLS-R attaches a freshly initialized CTC head and undertrains at 3e-5.
-#     Whisper starts as a fully trained ASR model with a pretrained decoder, and
-#     1e-4 washes it out. 1e-5 is the standard whisper-small fine-tuning rate.
-#     "Comparable" here means each model at its own appropriate rate, not the
-#     same number in both files.
-#   * hidden_dropout / feat_proj_dropout / layerdrop / ctc_loss_reduction /
-#     ctc_zero_infinity are absent -- WhisperConfig has no such fields. The
-#     encoder and decoder carry separate layerdrop rates instead, both left at 0
-#     to match the CTC preset's layerdrop: 0.0.
-#   * group_by_length true -> false. Every clip is padded to Whisper's fixed
-#     30 s window, so length-grouped batching sorts nothing and only adds
-#     bookkeeping.
-#   * freeze_feature_extractor true -> false. Whisper's front end is a
-#     deterministic mel spectrogram plus two trainable conv layers; there is no
-#     learned feature encoder to freeze, and __main__.py rejects true here for a
-#     seq2seq objective.
-#   * eval/save every max_steps/40 (500 steps) rather than the CTC preset's /100
-#     (200 steps). Evaluation decodes autoregressively over 3736 dev utterances
-#     instead of taking an argmax, so it is orders of magnitude more expensive;
-#     100 evaluations would cost more wall-clock than the training itself. See
-#     the note at the bottom on shrinking the dev set if even 40 is too slow.
 name: zulu_whisper
 
 num_train_epochs: 100  # ceiling; training is controlled by max_steps
 max_steps: 20000
-per_device_train_batch_size: 16
-per_device_eval_batch_size: 8
+per_device_train_batch_size: 30
+per_device_eval_batch_size: 120
 gradient_accumulation_steps: 2
-gradient_checkpointing: true
+gradient_checkpointing: false
 learning_rate: 1e-5
 lr_scheduler_type: linear
 warmup_ratio: 0.1
 max_grad_norm: 1.0
 
 # regularization and masking (override pretrained defaults)
-dropout: 0.1
-attention_dropout: 0.1
-activation_dropout: 0.0
+dropout: 0.05
+attention_dropout: 0.05
+activation_dropout: 0.05
 encoder_layerdrop: 0.0
 decoder_layerdrop: 0.0
 mask_time_prob: 0.05
-mask_feature_prob: 0.01
+mask_feature_prob: 0.05
 weight_decay: 0.01
 
 logging_steps: ${divide:${training.max_steps},400}
@@ -76,11 +31,6 @@ load_best_model_at_end: true
 metric_for_best_model: wer
 greater_is_better: false
 
-# Generation during evaluation. 225 is ~2x the longest label observed in a
-# 102-utterance sample (123 tokens); it caps the repetition loops Whisper falls
-# into early in fine-tuning without truncating real transcripts. Greedy
-# decoding keeps evaluation affordable -- use beams for the final scoring via
-# `python -m tools.eval` rather than paying for them 40 times mid-run.
 generation_max_length: 225
 generation_num_beams: 1
 
@@ -98,11 +48,3 @@ early_stopping_patience: 10
 early_stopping_delay_ratio: 0.0
 
 unfreeze_step_ratio: null
-
-# IF EVALUATION IS TOO SLOW
-# 3736 dev utterances decoded autoregressively 40 times is the main wall-clock
-# risk in this preset, and it is a cost the CTC preset does not pay. If it
-# dominates the run, prefer shrinking the dev set (dataset.dev_size) over
-# evaluating less often -- fewer evaluation points make early stopping and
-# best-checkpoint selection coarser, whereas a 1000-utterance dev set still
-# estimates WER tightly enough to choose a checkpoint.
