@@ -154,6 +154,56 @@ Three files per run live under `outputs/`:
 | `outputs/trainer_states/{id}.json` | the metric history HuggingFace wrote |
 | `outputs/registry.yaml` | one row per run: extracted params plus your notes |
 
+### Naming runs and configs
+
+A run's checkpoint directory is assembled from four config values:
+
+```
+models/{dataset.id}/{model.short_name}_{training.name}[_{focus vocab}]_{experiment_id}
+```
+
+Each is a knob, so they compound. Three habits keep the result readable.
+
+**Don't restate an outer level.** `dataset.id` is already a directory, so a
+corpus name inside `model.short_name` or `training.name` is paid for twice.
+
+This is where the config *file* name and the name in the path come apart, and
+they are already separate fields. The filename is what you type
+(`training=zulu_whisper`) and should say what the preset is for; `name:` is what
+lands in the path, where the corpus is overhead:
+
+```yaml
+# configs/training/zulu_whisper.yaml   <- descriptive, for the command line
+name: whisper                          <- terse, for the path
+```
+
+**Keep `_` for joints and `-` inside components.** The path joins components
+with `_`, so a component containing `_` hides its own boundaries:
+`whisper_small_zu_zulu_whisper` has no visible seams, while
+`whisper-small_zulu-whisper` does. FOCUS ids already follow this.
+
+**Let `experiment_id` name what varies.** It is the last segment and the key
+everything else uses, so it should say what this run changed — `lr1e-5`,
+`bs64`, `frozen-encoder` — rather than repeating the model, which is already
+two segments to its left.
+
+Applied together:
+
+```
+zulu/whisper-medium-zu_zulu_whisper_focus-v4k-whisper-medium-zu_whisper-medium1
+zulu/whisper-medium_whisper_focus-v4k_lr1e-5
+```
+
+The FOCUS segment shortened on its own: the run path uses the vocabulary id
+(`focus-v4k`) rather than the full tokenizer id, which ends with the model slug
+that `model.short_name` has already contributed. Tokenizer *cache* directories
+keep the model, since those sit side by side with nothing else to tell them
+apart.
+
+Renaming these values changes where a run writes, so do it between runs --
+`preempt_resume` finds checkpoints by path, and a rename points it at an empty
+directory.
+
 ### Pulling runs off a cluster
 
 `fetch_results.sh` inventories the remote, works out what is missing or stale,
