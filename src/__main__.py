@@ -54,9 +54,11 @@ def _build_output_dir(args: DictConfig) -> str:
     base_path = os.path.join(args.output_dir, language, f"{model_short}_{training_name}")
 
     # A replaced vocabulary is a different experiment, not a rerun of the same
-    # one, so it must not land on the baseline's checkpoints.
+    # one, so it must not land on the baseline's checkpoints. `vocabulary_id`
+    # rather than `tokenizer_id`: the latter ends with the model slug, which
+    # `model_short` has already put in this path.
     if focus.is_enabled(args):
-        base_path = f"{base_path}_{focus.tokenizer_id(args)}"
+        base_path = f"{base_path}_{focus.vocabulary_id(args)}"
 
     experiment_id = args.get("experiment_id")
     if experiment_id:
