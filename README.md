@@ -137,6 +137,131 @@ python -m tools.eval \
     --lm_arpa lm/zulu_3gram.arpa
 ```
 
+## Experiment Tracking
+
+Runs are tracked by **experiment id** — the `experiment_id` from §2, which names
+both the output directory and every record below.
+
+```bash
+python -m src dataset=zulu experiment_id=whisper15 training.learning_rate=1e-5
+```
+
+Three files per run live under `outputs/`:
+
+| path | holds |
+|---|---|
+| `outputs/configs/{id}.yaml` | the config the run was launched with |
+| `outputs/trainer_states/{id}.json` | the metric history HuggingFace wrote |
+| `outputs/registry.yaml` | one row per run: extracted params plus your notes |
+
+### Pulling runs off a cluster
+
+`fetch_results.sh` inventories the remote, works out what is missing or stale,
+and copies only that. No host or path is baked into the repository, so set them
+in your shell:
+
+```bash
+export ASR_REMOTE=my-cluster                    # ssh host, or an alias from ~/.ssh/config
+export ASR_MODEL_DIRS=/scratch/me/ASR/models    # colon-separated for several roots
+```
+
+```bash
+bash scripts/fetch_results.sh
+```
+
+Runs are keyed by the `experiment_id` inside each `training_config.yaml`, not by
+their directory path, so the same run inventoried from different roots lands in
+one place. Finished runs are never re-fetched; an in-progress run has only its
+trainer state refreshed, since a config cannot change mid-run.
+
+To see what it would do without moving anything:
+
+```bash
+INV="ssh $ASR_REMOTE 'bash -s' < tools/remote_inventory.sh -- -b $ASR_MODEL_DIRS"
+eval "$INV" | python -m tools.fetch_diff --dry-run
+```
+
+### Registering and annotating runs
+
+`extract` reads configs and upserts a row per run. It is safe to re-run; it
+updates rather than duplicates.
+
+```bash
+python -m tools.registry extract outputs/configs/whisper15.yaml
+python -m tools.registry extract --pattern 'outputs/configs/whisper.*\.yaml'
+```
+
+Parameters are pulled from the config's `model`, `training`, `dataset` and
+`focus` sections automatically — including `model.language`, which matters here
+because Whisper has no Zulu token and the config names a deliberate proxy. What
+only you can supply is why the run existed and what it showed:
+
+```bash
+python -m tools.registry annotate whisper15 \
+    --note "whisper-small, FOCUS 4k, lr 1e-5, effective batch 32" \
+    --observation "WER plateaus ~step 12k; dev loss still falling" \
+    --era focus --group vocab-sweep
+```
+
+`--status manually_closed` retires a run, which also stops `fetch_results.sh`
+re-fetching it.
+
+### Reading the registry
+
+```bash
+python -m tools.registry show                       # everything
+python -m tools.registry show --era focus --group vocab-sweep
+python -m tools.registry diff whisper5 whisper9     # only what differs
+python -m tools.registry verify                     # rows still match outputs/configs/
+python -m tools.registry debt                       # runs on disk with no row, rows with no note
+```
+
+`diff` is the one to reach for when comparing a sweep — it prints only the
+parameters that vary and lists the rest as constant, so a forty-field config
+collapses to the handful you actually changed:
+
+```
+Run       effective_batch  vocab_size  mask_time_prob
+whisper5                2        4096            0.05
+whisper9                4        2048            0.07
+```
+
+`debt --strict` exits non-zero, which makes it usable as a pre-commit or CI check
+that no run went un-annotated.
+
+### Plotting
+
+`training_plot.py` reads trainer states directly — no registry required. It works
+on a fetched mirror as well as on the local `models/` tree shown in §3.
+
+```bash
+# one run, several metrics
+python -m tools.training_plot --metrics loss eval_wer eval_cer \
+    --state-file outputs/trainer_states/whisper15.json
+
+# compare runs; --state-pattern is a regex over paths
+python -m tools.training_plot --metric eval_wer \
+    --state-pattern "outputs/trainer_states/whisper(5|9)\.json"
+
+# discover what a run actually logged
+python -m tools.training_plot --list-metrics --state-file outputs/trainer_states/whisper15.json
+```
+
+Metric names are regexes, so with external eval sets (§2) `--metric "eval_.*_wer"`
+draws every per-set WER series at once.
+
+Useful when the defaults fight you:
+
+| flag | does |
+|---|---|
+| `--output plot.png` | save instead of opening a window |
+| `--ylim 0 1` | shared y-limits across panels |
+| `--ylims eval_wer:0:0.8` | per-metric limits; repeatable, wins over `--ylim` |
+| `--run-names ctc whisper` | legend labels instead of file paths |
+| `--exclude-pattern` | drop runs the state pattern swept up |
+| `--x-axis epoch` | plot against epochs rather than steps |
+| `--dark` | light-on-dark, for slides |
+
 ## Testing
 
 ```bash
