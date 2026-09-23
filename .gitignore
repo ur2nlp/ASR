@@ -23,7 +23,7 @@ plots/
 # Local helper scripts. The three below are the documented entry points and are
 # tracked deliberately -- a fork needs them -- so they are excepted by name.
 # Anything else dropped in here is personal scratch.
-scripts/
+scripts/*
 !scripts/run.sh
 !scripts/preempt_run.sh
 !scripts/fetch_results.sh
