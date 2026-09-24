@@ -202,7 +202,27 @@ apart.
 
 Renaming these values changes where a run writes, so do it between runs --
 `preempt_resume` finds checkpoints by path, and a rename points it at an empty
-directory.
+directory. Beyond that the cost differs sharply by which value you change:
+
+| value | what a rename costs |
+| --- | --- |
+| `training.name` | nothing; it appears only in the run directory |
+| `experiment_id` | rename `outputs/configs/{id}.yaml`, `outputs/trainer_states/{id}.json` and the registry row |
+| `model.short_name` | moves the processed and FOCUS caches — use `tools/migrate_model_short_name.py` |
+| `dataset.id` | relocates the whole `data/{id}` cache tree; not worth it |
+
+```bash
+python -m tools.migrate_model_short_name <old_short_name> <new_short_name>          # plan
+python -m tools.migrate_model_short_name <old_short_name> <new_short_name> --apply
+```
+
+It renames both cache directories and rewrites the `focus_tokenizer_id` the
+processed cache records, which a plain `mv` would leave pointing at the old
+model. Reversible by running with the names swapped.
+
+A separator-only change needs no migration at all: `_slugify` normalises `_` to
+`-`, so `whisper_small_zu` and `whisper-small-zu` produce the same cache
+directories and only the run directory name differs.
 
 ### Pulling runs off a cluster
 
