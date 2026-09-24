@@ -51,7 +51,7 @@ Other dataset `type`s are also supported: `huggingface` (a Hub dataset),
 ### 2. Train
 
 ```bash
-python -m src dataset=zulu model=xls-r training=l40_basic
+python -m src dataset=zulu model=xls-r training=l40-basic
 ```
 
 Override any config value on the command line:
@@ -61,14 +61,14 @@ python -m src dataset=zulu model=w2vbert2 training.learning_rate=1e-5
 ```
 
 Checkpoints are written to `models/{id}/{model_short_name}_{training_name}/`
-(e.g. `models/zulu/xlsr300m_l40_basic/`), with the best checkpoint under
+(e.g. `models/zulu/xlsr300m_l40-basic/`), with the best checkpoint under
 `best-checkpoint/`. Two runs with the same model and training config would
 overwrite each other, so give each run in a sweep an **experiment id**, which is
 appended as a suffix to that path:
 
 ```bash
 python -m src dataset=zulu experiment_id=lr1e-5 training.learning_rate=1e-5
-# → models/zulu/xlsr300m_l40_basic_lr1e-5/
+# → models/zulu/xlsr300m_l40-basic_lr1e-5/
 ```
 
 > **macOS note:** CTC loss has no native MPS kernel. To run locally on Apple
@@ -92,7 +92,7 @@ python -m src dataset=zulu external_eval=zulu_conditions
 
 ```bash
 python -m tools.eval \
-    --model_dir models/zulu/xlsr300m_l40_basic/best-checkpoint \
+    --model_dir models/zulu/xlsr300m_l40-basic/best-checkpoint \
     --test_data data/zulu/processed/test
 ```
 
@@ -100,21 +100,21 @@ Plot metric curves (WER/CER/loss) from a run's `trainer_state.json`:
 
 ```bash
 python -m tools.training_plot --metric eval_wer \
-    --state-file models/zulu/xlsr300m_l40_basic/best-checkpoint/trainer_state.json
+    --state-file models/zulu/xlsr300m_l40-basic/best-checkpoint/trainer_state.json
 ```
 
 Spot-check individual files interactively (type audio paths, toggle LM decoding
 live):
 
 ```bash
-python -m tools.transcribe --model_dir models/zulu/xlsr300m_l40_basic/best-checkpoint
+python -m tools.transcribe --model_dir models/zulu/xlsr300m_l40-basic/best-checkpoint
 ```
 
 ### 4. Decode audio files
 
 ```bash
 python -m tools.decode \
-    --model_dir models/zulu/xlsr300m_l40_basic/best-checkpoint \
+    --model_dir models/zulu/xlsr300m_l40-basic/best-checkpoint \
     --audio_dir path/to/audio/ \
     --output predictions.jsonl
 ```
@@ -132,7 +132,7 @@ Then boost decoding with it during eval:
 
 ```bash
 python -m tools.eval \
-    --model_dir models/zulu/xlsr300m_l40_basic/best-checkpoint \
+    --model_dir models/zulu/xlsr300m_l40-basic/best-checkpoint \
     --test_data data/zulu/processed/test \
     --lm_arpa lm/zulu_3gram.arpa
 ```
@@ -169,11 +169,11 @@ corpus name inside `model.short_name` or `training.name` is paid for twice.
 
 This is where the config *file* name and the name in the path come apart, and
 they are already separate fields. The filename is what you type
-(`training=zulu_whisper`) and should say what the preset is for; `name:` is what
+(`training=zulu-whisper`) and should say what the preset is for; `name:` is what
 lands in the path, where the corpus is overhead:
 
 ```yaml
-# configs/training/zulu_whisper.yaml   <- descriptive, for the command line
+# configs/training/zulu-whisper.yaml   <- descriptive, for the command line
 name: whisper                          <- terse, for the path
 ```
 
