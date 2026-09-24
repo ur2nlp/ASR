@@ -167,9 +167,16 @@ class TestNamingAndPaths:
         assert small.corpus_jsonl == large.corpus_jsonl
         assert small.tokenizer_dir != large.tokenizer_dir
 
-    def test_processed_cache_name_includes_focus_id(self, whisper_config):
+    def test_processed_cache_name_identifies_the_vocabulary(self, whisper_config):
+        """The FOCUS segment names the vocabulary, not the tokenizer.
+
+        It used to carry the full `tokenizer_id`, whose trailing model slug the
+        name already opens with. The record inside still stores the full id --
+        that is the cache key; this is the label.
+        """
         name = processed_cache_dirname(whisper_config)
-        assert "focus-v512-unigram-whisper-small" in name
+        assert "focus-v512-unigram" in name
+        assert name.count("whisper-small") == 1
 
     def test_processed_cache_name_excludes_focus_when_off(self, base_config):
         assert "focus" not in processed_cache_dirname(base_config)
