@@ -1,4 +1,4 @@
-name: zulu
+name: ctc
 
 num_train_epochs: 100  # ceiling; training is controlled by max_steps
 max_steps: 20000

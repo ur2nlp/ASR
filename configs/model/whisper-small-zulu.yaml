@@ -7,7 +7,7 @@
 
 type: whisper
 pretrained_name: openai/whisper-small
-short_name: whisper_small_zu
+short_name: whisper-small-zu
 
 # THE FORK DECISION.
 #
