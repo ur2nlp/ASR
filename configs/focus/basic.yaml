@@ -12,7 +12,7 @@
 # from the training data and errors if this is enabled.
 #
 #     python -m src dataset=zulu_whisper model=whisper-small-zulu \
-#         training=zulu_whisper focus=basic
+#         training=zulu-whisper focus=basic
 
 enabled: true
 
