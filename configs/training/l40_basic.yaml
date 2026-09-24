@@ -1,4 +1,4 @@
-name: l40_basic
+name: l40-basic
 
 num_train_epochs: 100  # ceiling; training is controlled by max_steps
 max_steps: 50000

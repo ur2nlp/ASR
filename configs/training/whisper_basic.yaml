@@ -13,7 +13,7 @@
 #   * freeze_feature_extractor false : Whisper's front end is a deterministic mel
 #     spectrogram followed by two trainable conv layers. Caching the mel features
 #     is always safe, so the conv stack is left trainable as in standard recipes.
-name: whisper_basic
+name: whisper-basic
 
 num_train_epochs: 100  # ceiling; training is controlled by max_steps
 max_steps: 20000

@@ -12,7 +12,7 @@
 
 type: whisper
 pretrained_name: openai/whisper-small
-short_name: whisper_small
+short_name: whisper-small
 
 # Language token prefixed to every transcript. Whisper only has tokens for the
 # 100 languages it was pretrained on -- if yours is not among them, name a
