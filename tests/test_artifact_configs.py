@@ -292,6 +292,39 @@ class TestProcessedCacheDirname:
             "processed_whisper-small_sr16k_a30_l448_af-transcribe"
         )
 
+    def _focus_args(self, vocab_size=4096, short_name="whisper-medium-zu"):
+        args = self._args(
+            {"type": "whisper", "short_name": short_name,
+             "language": "sw", "task": "transcribe"},
+            {"max_audio_length_seconds": 30.0, "max_label_length": 448},
+        )
+        args.focus = OmegaConf.create({
+            "enabled": True, "vocab_size": vocab_size,
+            "tokenizer_algorithm": None, "character_coverage": 1.0,
+            "num_samples": None,
+        })
+        return args
+
+    def test_the_focus_suffix_does_not_repeat_the_model(self):
+        """The name opens with the model slug; the FOCUS segment must not re-add it.
+
+        It used to append the whole `tokenizer_id`, which ends with that slug,
+        giving `processed_whisper-medium-zu_..._focus-v4k-whisper-medium-zu`.
+        """
+        name = processed_cache_dirname(self._focus_args())
+        assert name == "processed_whisper-medium-zu_sr16k_a30_l448_sw-transcribe_focus-v4k"
+        assert name.count("whisper-medium-zu") == 1
+
+    def test_vocabulary_sizes_still_get_separate_caches(self):
+        """Dropping the model must not collapse two vocabularies together."""
+        assert processed_cache_dirname(self._focus_args(2048)) != \
+            processed_cache_dirname(self._focus_args(4096))
+
+    def test_models_still_get_separate_caches_under_focus(self):
+        """The leading slug is what separates them now."""
+        assert processed_cache_dirname(self._focus_args(short_name="whisper-medium-zu")) != \
+            processed_cache_dirname(self._focus_args(short_name="whisper-small-zu"))
+
     def test_different_models_get_different_caches(self):
         dataset = {"max_audio_length_seconds": 30.0}
         ctc = processed_cache_dirname(
