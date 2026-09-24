@@ -4,7 +4,7 @@
 # separate config only because that setting lives in the `dataset` namespace and
 # a training config cannot reach into it -- see the note below.
 #
-#     python -m src dataset=zulu_whisper model=whisper-small-zulu training=zulu_whisper
+#     python -m src dataset=zulu_whisper model=whisper-small-zulu training=zulu-whisper
 
 defaults:
   - zulu
