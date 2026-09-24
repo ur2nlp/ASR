@@ -196,10 +196,17 @@ def processed_cache_dirname(args: DictConfig) -> str:
 
     # A replaced vocabulary changes every cached label, so it gets its own
     # subcache beside the pretrained-vocabulary one rather than invalidating it.
-    from src.focus import is_enabled as focus_is_enabled, tokenizer_id
+    #
+    # `vocabulary_id` rather than `tokenizer_id`: the latter ends with the model
+    # slug, which this name already opens with, and appending it produced
+    # `processed_whisper-medium-zu_..._focus-v4k-whisper-medium-zu`. The record
+    # inside the subcache still stores the full `tokenizer_id`, which is the
+    # actual cache key -- this is the readable label, and the model is already
+    # in it.
+    from src.focus import is_enabled as focus_is_enabled, vocabulary_id
 
     if focus_is_enabled(args):
-        parts.append(_slugify(tokenizer_id(args)))
+        parts.append(_slugify(vocabulary_id(args)))
 
     return "processed_" + "_".join(parts)
 
