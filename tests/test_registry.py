@@ -2,7 +2,7 @@
 
 import pytest
 
-from tools.registry import (
+from lapt_core.registry import (
     categorize_debt,
     diff_runs,
     extract_params,
@@ -11,6 +11,8 @@ from tools.registry import (
     save_registry,
     upsert_entry,
 )
+
+from tools.registry import ASR_SCHEMA
 
 
 @pytest.fixture
@@ -104,7 +106,7 @@ class TestCategorizeDebt:
 
 class TestExtractParams:
     def test_basic_extraction(self, sample_config):
-        exp_id, params = extract_params(sample_config)
+        exp_id, params = extract_params(sample_config, ASR_SCHEMA)
         assert exp_id == "v81"
         assert params["lr"] == 2.0e-05
         assert params["effective_batch"] == 180
@@ -121,7 +123,7 @@ class TestExtractParams:
     def test_missing_experiment_id(self):
         config = {"training": {"learning_rate": 1e-4}}
         with pytest.raises(ValueError, match="experiment_id"):
-            extract_params(config)
+            extract_params(config, ASR_SCHEMA)
 
     def test_missing_sections_graceful(self):
         """Configs with missing sections should still extract what's available."""
@@ -129,7 +131,7 @@ class TestExtractParams:
             "experiment_id": "v_minimal",
             "training": {"learning_rate": 1e-4, "max_steps": 1000},
         }
-        exp_id, params = extract_params(config)
+        exp_id, params = extract_params(config, ASR_SCHEMA)
         assert exp_id == "v_minimal"
         assert params["lr"] == 1e-4
         assert params["max_steps"] == 1000
@@ -143,7 +145,7 @@ class TestExtractParams:
             "experiment_id": "v_nograd",
             "training": {"train_batch_size": 32},
         }
-        _, params = extract_params(config)
+        _, params = extract_params(config, ASR_SCHEMA)
         assert params["effective_batch"] == 32
 
     def test_focus_disabled(self):
@@ -151,7 +153,7 @@ class TestExtractParams:
             "experiment_id": "v_nofocus",
             "focus": {"enabled": False},
         }
-        _, params = extract_params(config)
+        _, params = extract_params(config, ASR_SCHEMA)
         assert params["focus_enabled"] is False
 
     def test_extracts_all_scalars(self):
@@ -170,7 +172,7 @@ class TestExtractParams:
                 "character_coverage": 0.999,
             },
         }
-        _, params = extract_params(config)
+        _, params = extract_params(config, ASR_SCHEMA)
         assert params["max_grad_norm"] == 4.0
         assert params["bf16"] is True
         assert params["character_coverage"] == 0.999
@@ -187,7 +189,7 @@ class TestExtractParams:
                 "max_steps": 100000,
             },
         }
-        _, params = extract_params(config)
+        _, params = extract_params(config, ASR_SCHEMA)
         assert "logging_steps" not in params
         assert params["max_steps"] == 100000
 
@@ -226,12 +228,12 @@ class TestUpsertEntry:
 class TestDiffRuns:
     def test_varying_params(self, sample_config, sample_config_v82):
         registry = {}
-        eid1, p1 = extract_params(sample_config)
-        eid2, p2 = extract_params(sample_config_v82)
+        eid1, p1 = extract_params(sample_config, ASR_SCHEMA)
+        eid2, p2 = extract_params(sample_config_v82, ASR_SCHEMA)
         upsert_entry(registry, eid1, p1)
         upsert_entry(registry, eid2, p2)
 
-        varying, constant = diff_runs(registry, ["v81", "v82"])
+        varying, constant = diff_runs(registry, ["v81", "v82"], ASR_SCHEMA)
         assert "lr" in varying
         assert "dropout" in varying
         # these should be constant
@@ -241,19 +243,19 @@ class TestDiffRuns:
 
     def test_identical_runs(self, sample_config):
         registry = {}
-        eid, params = extract_params(sample_config)
+        eid, params = extract_params(sample_config, ASR_SCHEMA)
         upsert_entry(registry, eid, params)
         # duplicate under different name
         registry["v81_copy"] = {"params": dict(params)}
 
-        varying, constant = diff_runs(registry, ["v81", "v81_copy"])
+        varying, constant = diff_runs(registry, ["v81", "v81_copy"], ASR_SCHEMA)
         assert len(varying) == 0
         assert len(constant) > 0
 
     def test_missing_run(self):
         """Missing runs should be handled gracefully (empty params)."""
         registry = {"v81": {"params": {"lr": 2e-5}}}
-        varying, constant = diff_runs(registry, ["v81", "v_missing"])
+        varying, constant = diff_runs(registry, ["v81", "v_missing"], ASR_SCHEMA)
         # lr should vary (present vs None)
         assert "lr" in varying
 
@@ -263,7 +265,7 @@ class TestDiffRuns:
             "v5L": {"params": {"lr": 1e-5, "max_grad_norm": 4.0}},
             "v4L": {"params": {"lr": 1e-5, "max_grad_norm": 1.0}},
         }
-        varying, constant = diff_runs(registry, ["v5L", "v4L"])
+        varying, constant = diff_runs(registry, ["v5L", "v4L"], ASR_SCHEMA)
         assert "max_grad_norm" in varying
         assert "lr" in constant
 
