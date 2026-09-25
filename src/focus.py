@@ -36,6 +36,7 @@ from typing import Optional
 import torch
 import yaml
 from lapt_core.artifacts import config_digest
+from lapt_core.spm import create_bpe_backend, create_unigram_backend
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
@@ -394,12 +395,13 @@ def build_tokenizer(
     ]
 
     if algorithm == "bpe":
-        backend_tokenizer = _create_bpe_backend(
+        backend_tokenizer = create_bpe_backend(
             spm_model_path=os.path.join(paths.tokenizer_dir, "spm.model"),
             vocab_scores=vocab_scores,
+            unk_token=UNK_PIECE,
         )
     else:
-        backend_tokenizer = _create_unigram_backend(vocab_scores)
+        backend_tokenizer = create_unigram_backend(vocab_scores)
 
     num_special = _append_base_special_tokens(backend_tokenizer, base_tokenizer)
 
@@ -510,64 +512,7 @@ def _train_sentencepiece_model(
     return sp_model
 
 
-def _apply_spm_pipeline(backend_tokenizer) -> None:
-    """Install the normalizer, pre-tokenizer, and decoder SentencePiece implies.
 
-    This deliberately *replaces* the base checkpoint's byte-level pipeline
-    rather than reusing it: the learned pieces are SentencePiece pieces, written
-    with `▁` for a leading space, and a `ByteLevel` pre-tokenizer would never
-    produce a string that matches one. The two representations still line up
-    where it matters, because `deepfocus.vocab_helper.canonicalize_vocab`
-    decodes both vocabularies to text before comparing them (`Ġuku` and `▁uku`
-    both canonicalize to `▁uku`), so overlap detection is unaffected.
-    """
-    from tokenizers import decoders, normalizers
-    from tokenizers.pre_tokenizers import Metaspace
-
-    backend_tokenizer.normalizer = normalizers.Sequence(normalizers=[])
-    backend_tokenizer.pre_tokenizer = Metaspace(replacement="▁", prepend_scheme="always")
-    backend_tokenizer.decoder = decoders.Metaspace(replacement="▁", prepend_scheme="always")
-
-
-def _create_unigram_backend(vocab_scores: list[tuple[str, float]]):
-    """Build a `tokenizers.Tokenizer` around a Unigram model."""
-    from tokenizers import Tokenizer
-    from tokenizers.models import Unigram
-
-    # unk_id=0 matches the `unk_id` passed to SentencePiece training;
-    # byte_fallback=False keeps the model consistent with a training run that
-    # had byte fallback disabled.
-    backend_tokenizer = Tokenizer(Unigram(vocab_scores, unk_id=0, byte_fallback=False))
-    _apply_spm_pipeline(backend_tokenizer)
-    return backend_tokenizer
-
-
-def _create_bpe_backend(spm_model_path: str, vocab_scores: list[tuple[str, float]]):
-    """Build a `tokenizers.Tokenizer` around a BPE model.
-
-    A SentencePiece BPE model stores pieces and scores but no explicit merge
-    list, so the merges are reconstructed from the scores exactly as
-    HuggingFace's own `SpmConverter` does (higher score = earlier merge).
-    """
-    from tokenizers import Tokenizer
-    from tokenizers.models import BPE
-    from transformers.convert_slow_tokenizer import SentencePieceExtractor
-
-    _, merges = SentencePieceExtractor(spm_model_path).extract(vocab_scores)
-    bpe_vocab = {piece: index for index, (piece, _score) in enumerate(vocab_scores)}
-
-    backend_tokenizer = Tokenizer(
-        BPE(
-            bpe_vocab,
-            merges,
-            unk_token=UNK_PIECE,
-            fuse_unk=True,
-            byte_fallback=False,
-            dropout=None,
-        )
-    )
-    _apply_spm_pipeline(backend_tokenizer)
-    return backend_tokenizer
 
 
 def _append_base_special_tokens(backend_tokenizer, base_tokenizer) -> int:
@@ -705,7 +650,7 @@ def _validate_tokenizer(
 
     # The id space has to run 0..n-1 with no gaps or repeats. Appending the
     # special block above the learned pieces keeps it contiguous, so a break
-    # here means pieces collided on the way in: `_create_bpe_backend` keys its
+    # here means pieces collided on the way in: `lapt_core.spm` keys the BPE
     # vocabulary by piece string, so a duplicate piece from SentencePiece
     # overwrites an entry and leaves a hole rather than raising.
     #
