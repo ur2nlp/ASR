@@ -294,6 +294,73 @@ class TestCtcRejection:
             )
 
 
+class TestValidatorIdSpace:
+    """The id-space half of `_validate_tokenizer`.
+
+    Built without the network: the check reads `get_vocab()` and `len()`, so a
+    small hand-built Unigram tokenizer exercises it exactly as a real one would.
+    """
+
+    @staticmethod
+    def _tokenizer(pieces, specials=()):
+        from tokenizers import AddedToken, Tokenizer
+        from tokenizers.models import Unigram
+        from transformers import PreTrainedTokenizerFast
+
+        scored = [(piece, -float(index)) for index, piece in enumerate(pieces)]
+        backend = Tokenizer(Unigram(scored, unk_id=0, byte_fallback=False))
+        tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token=pieces[0])
+        if specials:
+            tokenizer.add_tokens(
+                [AddedToken(token, special=True) for token in specials],
+                special_tokens=True,
+            )
+        return tokenizer
+
+    @staticmethod
+    def _base(specials):
+        class _Base:
+            all_special_tokens = list(specials)
+
+        return _Base()
+
+    def test_appending_specials_keeps_the_id_space_contiguous(self):
+        """The inherited block lands above the learned pieces without a gap."""
+        specials = ["<|endoftext|>", "<|startoftranscript|>"]
+        tokenizer = self._tokenizer(["<unk>", "▁a", "▁b"], specials)
+
+        focus._validate_tokenizer(tokenizer, self._base(specials), 3, len(specials))
+
+        assert sorted(tokenizer.get_vocab().values()) == [0, 1, 2, 3, 4]
+
+    def test_duplicate_pieces_are_rejected(self):
+        """A repeated piece drops an id, which the size check catches first."""
+        tokenizer = self._tokenizer(["<unk>", "▁a", "▁a", "▁b"])
+
+        with pytest.raises(ValueError, match="expected 4"):
+            focus._validate_tokenizer(tokenizer, self._base([]), 4, 0)
+
+    def test_a_hole_is_rejected_even_when_the_count_is_right(self):
+        """Guard the state the size check cannot see.
+
+        No current build path reaches this: every way a piece can collide also
+        drops the count, so the size check fires first. It is held here so the
+        id space stays checked if that stops being true -- a hole is how
+        `tokenizers` reports a corrupt vocabulary ("contains holes for indices
+        [1]"), and the count alone would not say which piece went missing.
+        """
+
+        class _Holed:
+            def __len__(self):
+                return 3
+
+            def get_vocab(self):
+                return {"<unk>": 0, "▁a": 2, "▁b": 3}
+
+        with pytest.raises(ValueError, match="not contiguous"):
+            focus._validate_tokenizer(_Holed(), self._base([]), 3, 0)
+
+
 @pytest.mark.network
 class TestTokenizerConstruction:
     """Exercises the real build against openai/whisper-small.

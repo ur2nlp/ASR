@@ -680,9 +680,20 @@ def _validate_tokenizer(
 ) -> None:
     """Check the reloaded tokenizer against what was written.
 
-    Catches the two failure modes that would otherwise surface much later as an
+    Catches the failure modes that would otherwise surface much later as an
     unexplained accuracy floor: a vocabulary that did not come out the expected
-    size, and a special token whose string survived but whose role did not.
+    size, an id space with gaps or duplicates, and a special token whose string
+    survived but whose role did not.
+
+    Args:
+        tokenizer: The reloaded tokenizer to check.
+        base_tokenizer: The checkpoint whose special tokens were inherited.
+        expected_learned: Number of pieces SentencePiece was asked to learn.
+        expected_special: Number of inherited special tokens appended after them.
+
+    Raises:
+        ValueError: If the size, the id space, or the special-token roles are
+            not what the build should have produced.
     """
     expected_total = expected_learned + expected_special
     if len(tokenizer) != expected_total:
@@ -690,6 +701,27 @@ def _validate_tokenizer(
             f"FOCUS tokenizer has {len(tokenizer)} tokens, expected "
             f"{expected_total} ({expected_learned} learned + {expected_special} "
             f"inherited special)."
+        )
+
+    # The id space has to run 0..n-1 with no gaps or repeats. Appending the
+    # special block above the learned pieces keeps it contiguous, so a break
+    # here means pieces collided on the way in: `_create_bpe_backend` keys its
+    # vocabulary by piece string, so a duplicate piece from SentencePiece
+    # overwrites an entry and leaves a hole rather than raising.
+    #
+    # Subordinate to the size check above, which currently catches every way
+    # that can happen, because losing a piece also drops the count. Kept
+    # because the two stop being equivalent the moment a build path adds an id
+    # from somewhere else, and a hole names the corrupt piece where a count
+    # only says the total is wrong.
+    token_ids = sorted(tokenizer.get_vocab().values())
+    if token_ids != list(range(expected_total)):
+        span = f"{token_ids[0]}-{token_ids[-1]}" if token_ids else "empty"
+        duplicates = len(token_ids) - len(set(token_ids))
+        raise ValueError(
+            f"FOCUS tokenizer id space is not contiguous: {len(token_ids)} ids "
+            f"spanning {span} with {duplicates} duplicate(s), expected "
+            f"0-{expected_total - 1} with no gaps."
         )
 
     missing = [
