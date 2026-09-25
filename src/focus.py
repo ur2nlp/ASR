@@ -582,8 +582,8 @@ def _append_base_special_tokens(backend_tokenizer, base_tokenizer) -> int:
 
     Appending them in their original id order after the learned pieces means
     every one of those ids shifts by the same constant, which keeps the block
-    internally consistent; `models.py:remap_generation_config` then rewrites the
-    stored ids by looking each token back up by name.
+    internally consistent; `remap_special_token_ids` then rewrites the stored
+    ids by looking each token back up by name.
 
     Args:
         backend_tokenizer: The freshly built `tokenizers.Tokenizer`, modified in
