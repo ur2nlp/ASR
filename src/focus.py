@@ -26,7 +26,6 @@ out of the pretrained rows, and the special-token block keeps its embeddings
 verbatim because those tokens are carried over unchanged.
 """
 
-import hashlib
 import json
 import os
 import shutil
@@ -36,6 +35,7 @@ from typing import Optional
 
 import torch
 import yaml
+from lapt_core.artifacts import config_digest
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
@@ -216,8 +216,7 @@ def embedding_hash(args: DictConfig) -> str:
         "fasttext_model_epochs": args.focus.get("fasttext_model_epochs", 3),
         "fasttext_model_dim": args.focus.get("fasttext_model_dim", 100),
     }
-    canonical = json.dumps(keys, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:8]
+    return config_digest(keys)
 
 
 def _sidecar_paths(tokenizer_dir: str, digest: str) -> tuple[str, str, str]:
