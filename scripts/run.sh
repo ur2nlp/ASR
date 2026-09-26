@@ -34,7 +34,7 @@ set -euo pipefail
 
 DATASET=${DATASET:-zulu}
 MODEL=${MODEL:-xls-r}
-TRAINING=${TRAINING:-l40_basic}
+TRAINING=${TRAINING:-ctc-basic}
 EXPERIMENT_ID=${EXPERIMENT_ID:-${SLURM_JOB_NAME:-}}
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

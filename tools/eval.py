@@ -7,7 +7,7 @@ argmax (optionally with KenLM shallow fusion), seq2seq models autoregressively.
 
 Usage:
     python -m tools.eval \
-        --model_dir models/zulu/xlsr300m_l40-basic/best-checkpoint \
+        --model_dir models/zulu/xlsr300m_ctc-basic/best-checkpoint \
         --test_data data/zulu/test \
         --lm_arpa path/to/lm.arpa
 

@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - model: xls-r
-  - training: l40-basic
+  - training: ctc-basic
   - dataset: ???
   - focus: none
   - external_eval: none

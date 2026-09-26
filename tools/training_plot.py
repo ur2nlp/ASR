@@ -11,7 +11,7 @@ Supports two input formats:
 
 Usage:
     # Single run
-    python tools/training_plot.py --metric loss --state-file models/zulu/xlsr300m_l40-basic/best-checkpoint/trainer_state.json
+    python tools/training_plot.py --metric loss --state-file models/zulu/xlsr300m_ctc-basic/best-checkpoint/trainer_state.json
 
     # Compare multiple runs (regex matched against file paths under current directory)
     python tools/training_plot.py --metric eval_wer --state-pattern "models/.*/trainer_state\\.json"
