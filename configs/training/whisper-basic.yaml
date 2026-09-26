@@ -1,4 +1,7 @@
-# Baseline Whisper fine-tuning preset for a single L40/L40S (effective batch 32).
+# Baseline Whisper fine-tuning preset for a single L40/L40S (effective batch 60).
+#
+# The batch sizes, regularization and learning rate here are measured, not
+# guessed: they are what a basic Whisper run was tuned to on an L40S.
 #
 # Deltas from the CTC presets, and why:
 #   * learning_rate 3e-5 -> 1e-5 : the standard Whisper fine-tuning rate. Whisper
@@ -17,25 +20,26 @@ name: whisper-basic
 
 num_train_epochs: 100  # ceiling; training is controlled by max_steps
 max_steps: 20000
-per_device_train_batch_size: 16
-per_device_eval_batch_size: 8
+per_device_train_batch_size: 30
+per_device_eval_batch_size: 120
 gradient_accumulation_steps: 2
-gradient_checkpointing: true
+gradient_checkpointing: false
 learning_rate: 1e-5
 lr_scheduler_type: linear
-warmup_ratio: 0.05
+warmup_ratio: 0.1
 max_grad_norm: 1.0
 
-# regularization (override pretrained defaults)
-dropout: 0.0
-attention_dropout: 0.0
-activation_dropout: 0.0
+# regularization and masking (override pretrained defaults). A pretrained
+# Whisper ships with these at 0; a small corpus overfits without them.
+dropout: 0.05
+attention_dropout: 0.05
+activation_dropout: 0.05
 encoder_layerdrop: 0.0
 decoder_layerdrop: 0.0
-# SpecAugment over the encoder input; raise both to regularize on small corpora
+# SpecAugment over the encoder input
 mask_time_prob: 0.05
-mask_feature_prob: 0.0
-weight_decay: 0.0
+mask_feature_prob: 0.05
+weight_decay: 0.01
 
 # evaluation decodes autoregressively (predict_with_generate), which is far
 # slower than a CTC argmax -- evaluate less often than the CTC presets do
