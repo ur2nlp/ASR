@@ -1,9 +1,8 @@
 """FOCUS vocabulary replacement and embedding reinitialization for seq2seq ASR.
 
-Ported from the LAPT framework (`src/tokenizer_utils.py`,
-`src/model_utils.py:_initialize_focus_model`) and adapted to the two things
-that differ here: the target corpus is ASR *transcripts* rather than raw web
-text, and the base tokenizer belongs to Whisper rather than a text LM.
+Two things shape this implementation: the target corpus is ASR *transcripts*
+rather than running text, and the base tokenizer belongs to a speech model
+whose special-token block carries structure the vocabulary swap must preserve.
 
 The pipeline is:
 
@@ -452,12 +451,12 @@ def _train_sentencepiece_model(
 ):
     """Train a SentencePiece model over the transcripts and load it back.
 
-    Unlike LAPT's version this trains *no* special pieces beyond `<unk>`: the
-    base checkpoint's special tokens are re-attached afterwards as added tokens
-    so they keep their original relative order (see
-    `_append_base_special_tokens`). Letting SentencePiece mint them instead
-    would scatter them through the learned vocabulary and break the id
-    arithmetic that Whisper's generation config depends on.
+    This trains *no* special pieces beyond `<unk>`. The base checkpoint's
+    special tokens are re-attached afterwards as added tokens so they keep
+    their original relative order (see `_append_base_special_tokens`). Letting
+    SentencePiece mint them instead would scatter them through the learned
+    vocabulary and break the id arithmetic Whisper's generation config depends
+    on.
 
     Raises:
         ValueError: If SentencePiece cannot reach the requested vocabulary size,

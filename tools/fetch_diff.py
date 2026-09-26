@@ -12,9 +12,8 @@ is hardcoded: the host and the remote paths belong to whoever runs this.
 
 Runs are keyed by the `experiment_id` their training_config.yaml declares, not
 by their directory path, so the same run inventoried from different -b roots
-lands in one place rather than two. Unlike LAPT's copy of this tool there is no
-id normalization step: LAPT pads hand-typed ids (`v8L` -> `v08L`), whereas ASR
-ids come from the config verbatim and have no such variants.
+lands in one place rather than two. Ids are taken from the config verbatim and
+are never normalized, so whatever a run declared is what it is filed under.
 
 Usage:
     INV="ssh $ASR_REMOTE 'bash -s' < tools/remote_inventory.sh -- -b /path/to/models"

@@ -47,11 +47,10 @@ fi
 for BASE_DIR in "${BASE_DIRS[@]}"; do
     [ -d "$BASE_DIR" ] || continue
 
-    # A run directory is one containing a training_config.yaml. Unlike LAPT's
-    # flat models/{run}/ tree, ASR run dirs sit at variable depth --
-    # models/{dataset_id}/{model}_{training}_{experiment_id} (2 levels) or
-    # models/{codename} (1 level) -- so they are found by locating the config
-    # rather than by globbing one level down.
+    # A run directory is one containing a training_config.yaml. Run dirs sit at
+    # variable depth -- models/{dataset_id}/{model}_{training}_{experiment_id}
+    # (2 levels) or models/{codename} (1 level) -- so they are found by
+    # locating the config rather than by globbing a fixed level down.
     configs=$(find "$BASE_DIR" -mindepth 1 -maxdepth 3 -name training_config.yaml)
 
     for config in $configs; do

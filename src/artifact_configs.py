@@ -5,11 +5,10 @@ verify that cached artifacts match the current config. Mismatches produce
 clear error messages with remediation instructions.
 
 The base layer -- `ArtifactConfig`, `dict_diff`, `format_number` -- is not
-defined here. It comes from `lapt-core`, a standalone distribution shared with
-the LAPT repository, so the two projects cannot drift apart the way a
-hand-copied version did. What stays in this module is the part that is
-genuinely ASR's: the concrete config classes, and the audio-specific cache
-naming they depend on.
+defined here. It comes from `lapt-core`, a standalone distribution this
+project depends on rather than vendors, so the caching contract cannot drift.
+What stays in this module is the part that is genuinely ASR's: the concrete
+config classes, and the audio-specific cache naming they depend on.
 
 `ArtifactConfig`, `dict_diff` and `format_number` are re-exported so that
 existing `from src.artifact_configs import ...` call sites keep working.

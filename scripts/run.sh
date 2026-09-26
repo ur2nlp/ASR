@@ -1,38 +1,42 @@
 #!/bin/bash
-#SBATCH -p ur2nlp
-#SBATCH -A cdowney4_lab
 #SBATCH -c 12
 #SBATCH --mem=128g
 #SBATCH --gres=gpu:1
 #SBATCH -t 120:00:00
 #SBATCH -o outputs/%x.out
 #SBATCH -e outputs/%x.err
-#SBATCH --mail-user=cdowney4@ur.rochester.edu
 #SBATCH --mail-type=END,FAIL
 
-# Standard (non-preempt) training launch on CIRC. Submit with a job name, which
-# also names the log files (outputs/<name>.out / .err) and is a good place to
-# reuse the run codename:
+# Standard (non-preempt) training launch. Submit with a job name, which also
+# names the log files (outputs/<name>.out / .err) and is a good place to reuse
+# the run codename:
 #
-#     sbatch -J zulu_xlsr_run1 scripts/run.sh
+#     sbatch -J <run_name> scripts/run.sh
 #
-# Override dataset/model/training via environment variables, and pass any extra
-# Hydra overrides as trailing arguments:
+# Site-specific submission flags -- partition, account, mail address -- are
+# deliberately not in this file. Keeping them out is what lets it stay
+# byte-identical on every branch and in every fork, so merges never conflict
+# over them. Put yours in one variable in your cluster shell rc:
 #
-#     DATASET=zulu MODEL=xls-r sbatch -J zulu_xlsr_run1 scripts/run.sh \
+#     export ASR_SBATCH_FLAGS="-p <partition> -A <account> --mail-user=<you@example.edu>"
+#     sbatch $ASR_SBATCH_FLAGS -J <run_name> scripts/run.sh
+#
+# Command-line flags override #SBATCH directives, so the same variable also
+# overrides the resource defaults above. With --mail-user unset, SLURM mails the
+# submitting user.
+#
+# Choose the run with environment variables, and pass any extra Hydra overrides
+# as trailing arguments:
+#
+#     DATASET=<your_dataset> MODEL=xls-r sbatch -J <run_name> scripts/run.sh \
 #         training.learning_rate=3e-4
 #
-# Coming from LAPT, two things differ:
-#   * `dataset` is a mandatory default in ASR, so it is `dataset=zulu` with NO
-#     leading `+` (LAPT uses `+dataset=...` because dataset is not in its
-#     defaults).
-#   * The conda env is `asr`, not `lapt`.
-# `experiment_id` works exactly as in LAPT: it is appended as a suffix to the
-# descriptive output path. It defaults to the job name below.
+# `experiment_id` is appended as a suffix to the descriptive output path, and
+# defaults to the job name.
 
 set -euo pipefail
 
-DATASET=${DATASET:-zulu}
+DATASET=${DATASET:?set DATASET to a config in configs/dataset/ (e.g. DATASET=my_corpus)}
 MODEL=${MODEL:-xls-r}
 TRAINING=${TRAINING:-ctc-basic}
 EXPERIMENT_ID=${EXPERIMENT_ID:-${SLURM_JOB_NAME:-}}
