@@ -8,7 +8,7 @@ KenLM beam search, beam width, LM weights) can be toggled live so you can spot
 
 Usage:
     # Interactive session (greedy decoding)
-    python -m tools.transcribe --model_dir models/zulu/xlsr300m_l40-basic/best-checkpoint
+    python -m tools.transcribe --model_dir models/zulu/xlsr300m_ctc-basic/best-checkpoint
 
     # Start with KenLM decoding enabled
     python -m tools.transcribe --model_dir <dir> --lm_arpa lm/zulu_3gram.arpa

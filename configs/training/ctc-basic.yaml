@@ -1,23 +1,29 @@
-name: l40-basic
+# Baseline CTC fine-tuning preset for a single L40/L40S (effective batch 60).
+#
+# The batch sizes, regularization, masking and learning rate here are
+# measured, not guessed: they are what a basic CTC run was tuned to on an
+# L40S.
+name: ctc-basic
 
 num_train_epochs: 100  # ceiling; training is controlled by max_steps
-max_steps: 50000
-per_device_train_batch_size: 16
-per_device_eval_batch_size: 16
-gradient_accumulation_steps: 2
-gradient_checkpointing: true
-learning_rate: 3e-5
+max_steps: 20000
+per_device_train_batch_size: 15
+per_device_eval_batch_size: 30
+gradient_accumulation_steps: 4
+gradient_checkpointing: false
+learning_rate: 5e-5
 lr_scheduler_type: linear
-warmup_ratio: 0.1
+warmup_ratio: 0.005
 max_grad_norm: 1.0
 
 # regularization and masking (override pretrained defaults)
-dropout: 0.1
-attention_dropout: 0.1
-hidden_dropout: 0.1
-feat_proj_dropout: 0.1
-mask_time_prob: 0.05
-mask_feature_prob: 0.0  # SpecAugment feature masking; raise (~0.01) to regularize
+dropout: 0.05
+attention_dropout: 0.05
+hidden_dropout: 0.05
+feat_proj_dropout: 0.05
+# SpecAugment over the encoder input
+mask_time_prob: 0.15
+mask_feature_prob: 0.15
 layerdrop: 0.0
 ctc_loss_reduction: mean
 # zero out non-finite CTC losses instead of letting them poison the gradient;
@@ -25,7 +31,7 @@ ctc_loss_reduction: mean
 ctc_zero_infinity: true
 weight_decay: 0.01
 
-logging_steps: ${divide:${training.max_steps},400}
+logging_steps: ${divide:${training.max_steps},1000}
 eval_strategy: steps
 eval_steps: ${divide:${training.max_steps},100}
 save_strategy: steps
