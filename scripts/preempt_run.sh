@@ -6,23 +6,22 @@
 #SBATCH -t 48:00:00
 #SBATCH -o outputs/%x.out
 #SBATCH -e outputs/%x.err
-#SBATCH --mail-user=cdowney4@ur.rochester.edu
 #SBATCH --mail-type=END,FAIL
 
-# Preempt-partition training launch on CIRC. Jobs here can be killed and
+# Preempt-partition training launch. Jobs here can be killed and
 # requeued at any time, so `preempt_resume=true` is essential: on requeue the
 # job auto-resumes from the latest checkpoint in the output directory instead of
 # restarting from step 0. Keep the experiment id stable across requeues so the
 # output directory (and its checkpoints) is reused:
 #
-#     sbatch -J zulu_xlsr_run1 scripts/preempt_run.sh
+#     sbatch -J <run_name> scripts/preempt_run.sh
 #
-# See scripts/run.sh for the LAPT -> ASR notes (dataset has no leading `+`; conda
-# env is `asr`).
+# See scripts/run.sh for $ASR_SBATCH_FLAGS, which carries the partition, account
+# and mail address this file deliberately leaves out.
 
 set -euo pipefail
 
-DATASET=${DATASET:-zulu}
+DATASET=${DATASET:?set DATASET to a config in configs/dataset/ (e.g. DATASET=my_corpus)}
 MODEL=${MODEL:-xls-r}
 TRAINING=${TRAINING:-ctc-basic}
 EXPERIMENT_ID=${EXPERIMENT_ID:-${SLURM_JOB_NAME:-}}

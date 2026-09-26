@@ -5,7 +5,7 @@ remote directory path. That id depended on which `-b` root the inventory was run
 against, so the same run fetched from `models/` and from `models/zulu/` landed in
 two directories -- and nothing could tell they were the same run. The fetcher now
 keys runs by the `experiment_id` in each `training_config.yaml`, and stores them
-the way LAPT does:
+flat, by artifact kind:
 
     outputs/{run_id}/trainer_state.json     ->  outputs/trainer_states/{exp_id}.json
     outputs/{run_id}/training_config.yaml   ->  outputs/configs/{exp_id}.yaml
