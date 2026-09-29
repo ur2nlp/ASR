@@ -460,6 +460,15 @@ def main(args: DictConfig) -> None:
     trainer.save_model(best_model_dir)
     processor.save_pretrained(best_model_dir)
 
+    # Write trainer_state.json at the run root. `save_model` does not -- it saves
+    # the model and tokenizer only -- and the state it holds is the sole record
+    # that a run finished: only the copy written here carries the `train_runtime`
+    # that the final `train()` log entry adds. `tools/remote_inventory.sh` looks
+    # for it first and drops a run entirely when it is missing, and
+    # `fetch_diff.get_local_status` needs it to call a run complete rather than
+    # still training. Without it a finished run is invisible to the fetcher.
+    trainer.save_state()
+
     # copy config to best checkpoint for reproducibility
     with open(os.path.join(best_model_dir, "training_config.yaml"), "w") as f:
         OmegaConf.save(args, f)
