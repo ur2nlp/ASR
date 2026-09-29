@@ -27,6 +27,7 @@ scripts/*
 !scripts/run.sh
 !scripts/preempt_run.sh
 !scripts/fetch_results.sh
+!scripts/update_lapt_core.sh
 
 # IDE
 .vscode/

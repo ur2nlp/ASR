@@ -419,16 +419,20 @@ line; then it never collides.
 
 If the merge touched `environment.yml`, the pinned `lapt-core` release moved.
 That is the only dependency change a merge can bring, and it does not need the
-environment rebuilt — the pip line in `environment.yml` names the current tag:
+environment rebuilt:
 
 ```bash
-pip install --no-deps --upgrade \
-    "lapt-core[datasets,tokenizers,plotting] @ https://github.com/ur2nlp/LAPT/archive/refs/tags/<tag>.tar.gz#subdirectory=packages/lapt-core"
+bash scripts/update_lapt_core.sh
 ```
 
-`--no-deps` is deliberate: `lapt-core`'s extras are already installed from
-`environment.yml`, and letting pip re-resolve them can drop a CPU build of torch
-over a working CUDA one.
+With no argument it installs whatever tag `environment.yml` now pins, which is
+what you want right after a pull. Pass a tag — `0.1.6`, `v0.1.6` or
+`lapt-core-v0.1.6` — to install a specific release instead.
+
+The script reads the requirement out of `environment.yml` rather than repeating
+it, so the extras and URL cannot drift, and it installs with `--no-deps`:
+`lapt-core`'s extras are already present from `environment.yml`, and letting pip
+re-resolve them can drop a CPU build of torch over a working CUDA one.
 
 ## Contributing back
 
