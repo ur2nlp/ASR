@@ -395,6 +395,41 @@ The caching layer under `artifact_configs.py` comes from
 [`lapt-core`](https://github.com/ur2nlp/LAPT/tree/main/packages/lapt-core),
 shared with a sibling project rather than reimplemented here.
 
+## Staying current with upstream
+
+A fork does not follow this repository on its own. Point it at one once:
+
+```bash
+git remote add upstream https://github.com/ur2nlp/ASR.git
+```
+
+Then pull whenever you want the latest framework changes:
+
+```bash
+git pull upstream main
+```
+
+The configs you added — `configs/dataset/<yours>.yaml`, `configs/model/<yours>.yaml`
+— do not exist upstream, so a merge leaves them alone. That is the point of §1
+and §2: the work that is yours lives in files this repository never touches.
+
+`configs/main.yaml` is the one likely to conflict, because its `defaults:` block
+invites editing. Leave it as it is and pass `dataset=<yours>` on the command
+line; then it never collides.
+
+If the merge touched `environment.yml`, the pinned `lapt-core` release moved.
+That is the only dependency change a merge can bring, and it does not need the
+environment rebuilt — the pip line in `environment.yml` names the current tag:
+
+```bash
+pip install --no-deps --upgrade \
+    "lapt-core[datasets,tokenizers,plotting] @ https://github.com/ur2nlp/LAPT/archive/refs/tags/<tag>.tar.gz#subdirectory=packages/lapt-core"
+```
+
+`--no-deps` is deliberate: `lapt-core`'s extras are already installed from
+`environment.yml`, and letting pip re-resolve them can drop a CPU build of torch
+over a working CUDA one.
+
 ## Contributing back
 
 New checkpoints need nothing from this repo — they are a config file, as in §2.
