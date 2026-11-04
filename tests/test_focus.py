@@ -8,9 +8,9 @@ from omegaconf import OmegaConf
 
 from src import focus
 from src.artifact_configs import (
+    FeatureCacheConfig,
     FocusTokenizerConfig,
     format_number,
-    processed_cache_dirname,
 )
 
 
@@ -167,19 +167,21 @@ class TestNamingAndPaths:
         assert small.corpus_jsonl == large.corpus_jsonl
         assert small.tokenizer_dir != large.tokenizer_dir
 
-    def test_processed_cache_name_identifies_the_vocabulary(self, whisper_config):
-        """The FOCUS segment names the vocabulary, not the tokenizer.
+    def test_feature_cache_is_shared_across_vocabularies(self, whisper_config):
+        """FOCUS changes the labels, which are encoded per run, not the features.
 
-        It used to carry the full `tokenizer_id`, whose trailing model slug the
-        name already opens with. The record inside still stores the full id --
-        that is the cache key; this is the label.
+        Each FOCUS vocabulary used to get its own processed subcache holding an
+        identical copy of the features beside its labels.
         """
-        name = processed_cache_dirname(whisper_config)
-        assert "focus-v512-unigram" in name
-        assert name.count("whisper-small") == 1
+        from transformers import WhisperFeatureExtractor
 
-    def test_processed_cache_name_excludes_focus_when_off(self, base_config):
-        assert "focus" not in processed_cache_dirname(base_config)
+        extractor = WhisperFeatureExtractor()
+        small = FeatureCacheConfig.from_args(whisper_config, extractor).dirname()
+        whisper_config.focus.vocab_size = 4096
+        large = FeatureCacheConfig.from_args(whisper_config, extractor).dirname()
+        whisper_config.focus.enabled = False
+        disabled = FeatureCacheConfig.from_args(whisper_config, extractor).dirname()
+        assert small == large == disabled
 
 
 class TestEmbeddingHash:

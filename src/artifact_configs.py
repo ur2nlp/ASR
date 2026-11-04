@@ -18,17 +18,16 @@ import os
 import sys
 
 from dataclasses import asdict, dataclass, field
-from lapt_core.artifacts import ArtifactConfig, dict_diff, format_number
+from lapt_core.artifacts import ArtifactConfig, config_digest, dict_diff, format_number
 from omegaconf import DictConfig, OmegaConf
 
 __all__ = [
     "ArtifactConfig",
+    "FeatureCacheConfig",
     "FocusTokenizerConfig",
     "ModelConfig",
-    "ProcessedDatasetConfig",
     "dict_diff",
     "format_number",
-    "processed_cache_dirname",
     "warn_on_legacy_processed_cache",
 ]
 
@@ -38,50 +37,61 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 @dataclass
-class ProcessedDatasetConfig(ArtifactConfig):
-    """Tracks configuration for the processed (feature-extracted) dataset."""
+class FeatureCacheConfig(ArtifactConfig):
+    """Tracks the extracted-feature cache, shared across models and splits.
 
-    artifact_name = "Processed Dataset"
+    Feature extraction is the expensive stage, and its output depends only on
+    the audio and the feature extractor -- not on the tokenizer, the text
+    normalization, the train/dev/test assignment, or the length filters. So the
+    cache holds features for *every* example, and everything that varies by run
+    (labels, splits, filters) is applied afterwards by index, without rewriting
+    it. Two checkpoints with the same feature extractor (Whisper small and
+    medium both use 80 mel bins) share one cache; so does every FOCUS
+    vocabulary and every cross-validation fold.
 
-    model_type: str
-    pretrained_name: str
+    Attributes:
+        source: The untokenized source record (`source_config_record`).
+        feature_extractor: The extractor's own `to_dict()`, minus private keys.
+        input_column: Column the features are stored under.
+        sampling_rate: Rate the audio is resampled to before extraction.
+        source_splits: The source's split names, in storage order.
+    """
+
+    artifact_name = "Feature Cache"
+
+    source: dict
+    feature_extractor: dict
+    input_column: str
     sampling_rate: int
-    max_audio_length_seconds: float | None
-    vocab_size: int
-    max_label_length: int | None = None
-    # Text normalization settings. These belong here, not on the untokenized
-    # stage: that cache is written from the raw source before `normalize_dataset`
-    # runs, so preprocessing cannot change its contents -- while this cache holds
-    # label-encoded transcripts, which it changes completely. Recording it on the
-    # wrong stage meant a preprocessing change hard-failed a cache it could not
-    # affect, and was then invisible to the cache it did.
-    preprocessing: dict | None = None
-    # Only meaningful for multilingual seq2seq models, where they change the
-    # special tokens prefixed to every encoded transcript and therefore the
-    # cached labels.
-    language: str | None = None
-    task: str | None = None
-    # Identifies the FOCUS tokenizer when vocabulary replacement is on. A
-    # different FOCUS vocabulary means entirely different cached labels, so it
-    # must not share a subcache with the pretrained-vocabulary run.
-    focus_tokenizer_id: str | None = None
+    source_splits: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_args(cls, args: DictConfig, vocab_size: int) -> "ProcessedDatasetConfig":
-        from src.focus import is_enabled as focus_is_enabled, tokenizer_id
+    def from_args(cls, args: DictConfig, feature_extractor) -> "FeatureCacheConfig":
+        from src.processors import get_model_spec
+        from src.sources import source_config_record
 
+        extractor_settings = {
+            key: value
+            for key, value in sorted(feature_extractor.to_dict().items())
+            if not key.startswith("_")
+        }
         return cls(
-            model_type=args.model.type,
-            pretrained_name=args.model.pretrained_name,
+            source=source_config_record(args.dataset, args.seed),
+            feature_extractor=extractor_settings,
+            input_column=get_model_spec(args.model.type).input_column,
             sampling_rate=args.audio.sampling_rate,
-            max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
-            vocab_size=vocab_size,
-            max_label_length=args.dataset.get("max_label_length"),
-            preprocessing=OmegaConf.to_container(args.preprocessing, resolve=True),
-            language=args.model.get("language"),
-            task=args.model.get("task"),
-            focus_tokenizer_id=tokenizer_id(args) if focus_is_enabled(args) else None,
         )
+
+    def dirname(self) -> str:
+        """Name the cache directory: `features_<extractor>_<digest>`.
+
+        The digest covers everything except `source_splits`, which is only
+        known once the source has been read and is implied by `source` anyway.
+        """
+        keyed = self.to_dict()
+        del keyed["source_splits"]
+        extractor_type = self.feature_extractor.get("feature_extractor_type", "features")
+        return f"features_{_slugify(extractor_type)}_{config_digest(keyed)}"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -125,22 +135,8 @@ class FocusTokenizerConfig(ArtifactConfig):
 
 
 # ---------------------------------------------------------------------------
-# Processed-cache naming
+# Cache naming
 # ---------------------------------------------------------------------------
-
-def _format_sampling_rate(sampling_rate: int) -> str:
-    """Render a sampling rate compactly: 16000 -> '16k'."""
-    if sampling_rate % 1000 == 0:
-        return f"{sampling_rate // 1000}k"
-    return str(sampling_rate)
-
-
-def _format_seconds(seconds: float) -> str:
-    """Render a duration without a trailing '.0': 30.0 -> '30'."""
-    if float(seconds).is_integer():
-        return str(int(seconds))
-    return str(seconds).replace(".", "p")
-
 
 def _slugify(value: str) -> str:
     """Reduce an arbitrary config string to a filesystem-safe token."""
@@ -148,84 +144,31 @@ def _slugify(value: str) -> str:
     return "".join(safe).strip("-").lower()
 
 
-def processed_cache_dirname(args: DictConfig) -> str:
-    """Name the processed-dataset subcache for this run's configuration.
-
-    Feature extraction and label encoding are model-specific -- a wav2vec2 cache
-    holds raw-waveform `input_values` and character labels, a Whisper cache holds
-    mel `input_features` and subword labels -- so they cannot share a directory.
-    Rather than one `processed/` that every run invalidates in turn, each
-    configuration gets its own sibling subcache and they coexist:
-
-        data/zulu/untokenized/                            (text, model-agnostic)
-        data/zulu/vocab/                                  (CTC char vocab)
-        data/zulu/processed_xlsr300m_sr16k_a30/
-        data/zulu/processed_whisper_small_sr16k_a30_l448_af-transcribe/
-
-    The name carries only the fields derivable from `args`, so it can be
-    computed before the dataset is loaded (the `fresh_processed` cleanup needs
-    it). It is a readable key, not a complete fingerprint: the full tracked set,
-    including the vocab size that is only known after stage 1, lives in the
-    `config.yaml` written inside the subcache, and `ProcessedDatasetConfig`
-    still errors on a mismatch within a directory.
-
-    Args:
-        args: Full Hydra config (needs args.model, args.audio, args.dataset).
-
-    Returns:
-        Directory name such as `processed_whisper_small_sr16k_a30_l448_af-transcribe`.
-    """
-    model_short = args.model.get("short_name") or args.model.type
-    parts = [_slugify(model_short), f"sr{_format_sampling_rate(args.audio.sampling_rate)}"]
-
-    max_audio_length = args.dataset.get("max_audio_length_seconds")
-    if max_audio_length is not None:
-        parts.append(f"a{_format_seconds(max_audio_length)}")
-
-    max_label_length = args.dataset.get("max_label_length")
-    if max_label_length is not None:
-        parts.append(f"l{int(max_label_length)}")
-
-    # Only multilingual seq2seq models prefix language/task tokens to their
-    # labels; for everything else these are absent and add nothing to the name.
-    language = args.model.get("language")
-    task = args.model.get("task")
-    if language is not None:
-        parts.append(f"{_slugify(language)}-{_slugify(task)}" if task else _slugify(language))
-
-    # A replaced vocabulary changes every cached label, so it gets its own
-    # subcache beside the pretrained-vocabulary one rather than invalidating it.
-    #
-    # `vocabulary_id` rather than `tokenizer_id`: the latter ends with the model
-    # slug, which this name already opens with, and appending it produced
-    # `processed_whisper-medium-zu_..._focus-v4k-whisper-medium-zu`. The record
-    # inside the subcache still stores the full `tokenizer_id`, which is the
-    # actual cache key -- this is the readable label, and the model is already
-    # in it.
-    from src.focus import is_enabled as focus_is_enabled, vocabulary_id
-
-    if focus_is_enabled(args):
-        parts.append(_slugify(vocabulary_id(args)))
-
-    return "processed_" + "_".join(parts)
-
-
 def warn_on_legacy_processed_cache(cache_dir: str) -> None:
-    """Point out a pre-subcache `processed/` directory left by an older run.
+    """Point out processed caches in a layout that is no longer read.
 
-    Processed data used to live at a single `<cache_dir>/processed`. Those
-    directories are no longer read, so say so rather than let them sit taking up
-    disk with no explanation.
+    Processed data used to live at `<cache_dir>/processed`, then in
+    per-configuration `processed_<model>_<settings>` subcaches holding features
+    and labels together. Both are superseded by the shared `features_*` cache,
+    so say so rather than let them sit taking up disk with no explanation.
     """
-    legacy_path = os.path.join(cache_dir, "processed")
-    if not os.path.isdir(legacy_path):
+    if not os.path.isdir(cache_dir):
+        return
+    legacy = sorted(
+        name for name in os.listdir(cache_dir)
+        if (name == "processed" or name.startswith("processed_"))
+        and os.path.isdir(os.path.join(cache_dir, name))
+    )
+    if not legacy:
         return
 
     print(
-        f"Note: found a processed cache in the old layout at {legacy_path}.\n"
-        f"      Processed data now lives in per-configuration subcaches named\n"
-        f"      processed_<model>_<settings>, so this directory is no longer "
-        f"read and can be deleted.",
+        f"Note: found {len(legacy)} processed cache(s) in an old layout under "
+        f"{cache_dir}:\n"
+        + "".join(f"      {name}\n" for name in legacy)
+        + "      Features now live in a shared features_<extractor>_<digest> cache "
+        "and labels\n      are encoded per run, so these are no longer read and "
+        "can be deleted.",
         file=sys.stderr,
     )
 

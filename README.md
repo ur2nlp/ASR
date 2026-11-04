@@ -242,7 +242,7 @@ Renaming these changes where a run writes, so do it between runs —
 | --- | --- |
 | `training.name` | nothing; it appears only in the run directory |
 | `experiment_id` | rename `outputs/configs/{id}.yaml`, `outputs/trainer_states/{id}.json` and the registry row |
-| `model.short_name` | moves the processed and FOCUS caches — use `tools/migrate_model_short_name.py` |
+| `model.short_name` | moves the FOCUS caches — use `tools/migrate_model_short_name.py` |
 | `dataset.id` | relocates the whole `data/{id}` cache tree; not worth it |
 
 ```bash

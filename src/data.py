@@ -2,9 +2,9 @@
 
 The per-type loaders live in `src/sources/`, one `DatasetArtifact` subclass per
 dataset type; this module keeps the boundary that resolves one
-(`load_dataset_from_config`), the two-stage preparation pipeline (text
-normalization → feature extraction + label encoding), and runtime loading of
-external held-out eval sets.
+(`load_dataset_from_config`), the shared feature cache, the per-run stages
+applied over it by index (text normalization, label encoding, split assignment,
+length filtering), and runtime loading of external held-out eval sets.
 
 The data collators live in `src/collators.py`; they are re-exported here for
 callers that imported them from this module.
@@ -13,7 +13,7 @@ callers that imported them from this module.
 import os
 import sys
 
-from datasets import Audio, Dataset, DatasetDict
+from datasets import Audio, Dataset, DatasetDict, concatenate_datasets
 from omegaconf import DictConfig
 from transformers import ProcessorMixin
 
@@ -29,11 +29,14 @@ from src.sources.paired import build_paired_split
 __all__ = [
     "DataCollatorCTCWithPadding",
     "DataCollatorSpeechSeq2SeqWithPadding",
-    "ensure_train_dev_split",
+    "assemble_splits",
+    "build_feature_cache",
+    "default_assignment",
+    "encode_labels",
     "load_dataset_from_config",
     "load_external_eval_sets",
-    "normalize_dataset",
-    "prepare_dataset_for_training",
+    "load_feature_cache",
+    "normalize_texts",
 ]
 
 
@@ -79,128 +82,255 @@ def load_dataset_from_config(
 
 
 # ---------------------------------------------------------------------------
-# Train/dev splitting
+# Feature cache
 # ---------------------------------------------------------------------------
 
-def ensure_train_dev_split(
+AUDIO_PATH_COLUMN = "audio_path"
+SOURCE_SPLIT_COLUMN = "source_split"
+
+
+def build_feature_cache(
     dataset: DatasetDict,
-    dev_size: float | int,
-    seed: int = 1,
-) -> DatasetDict:
-    """Split training data into train/dev if no dev split exists.
+    feature_extractor,
+    input_column: str,
+    sampling_rate: int,
+    cache_path: str,
+) -> None:
+    """Extract features for every example of every source split, once.
+
+    Each source split is written to `<cache_path>/<split>.arrow` directly by
+    `Dataset.map`, so the features are written once and never copied, and
+    nothing lands in the source cache's directory (a `map` without an explicit
+    `cache_file_name` writes a full copy of its output beside its input, which
+    is how the untokenized cache grew to many times its size).
+
+    No examples are dropped here. The length filters, the text normalization,
+    the label encoding and the train/dev/test assignment all vary between runs
+    that share these features, so they are applied afterwards by index (see
+    `assemble_splits`).
+
+    Besides the features, each row keeps every non-audio source column, the
+    audio file's basename (`audio_path`), its source split name, and
+    `input_length` -- the raw audio length in samples, which is what the audio
+    length filter and length-grouped batching read.
 
     Args:
-        dataset: DatasetDict, possibly with only a 'train' split.
-        dev_size: Fraction (0-1) or absolute number of dev examples.
-        seed: Random seed for reproducibility.
+        dataset: The untokenized source.
+        feature_extractor: The model's feature extractor.
+        input_column: Column to store the features under.
+        sampling_rate: Rate to resample the audio to.
+        cache_path: Directory to write into; created if missing.
+    """
+    os.makedirs(cache_path, exist_ok=True)
+
+    for split_name in dataset:
+        split = dataset[split_name].cast_column("audio", Audio(sampling_rate=sampling_rate))
+
+        def _extract(example, split_name=split_name):
+            audio = example["audio"]
+            audio_array = audio["array"]
+            inputs = feature_extractor(
+                audio_array,
+                sampling_rate=sampling_rate,
+                return_tensors=None,
+            )
+            return {
+                input_column: inputs[input_column][0],
+                # measured on the raw audio rather than the features so that it
+                # stays meaningful for models padding to a fixed window
+                # (Whisper), where the feature length would sort nothing
+                "input_length": len(audio_array),
+                AUDIO_PATH_COLUMN: os.path.basename(audio["path"]) if audio["path"] else None,
+                SOURCE_SPLIT_COLUMN: split_name,
+            }
+
+        final_path = os.path.join(cache_path, f"{split_name}.arrow")
+        partial_path = final_path + ".partial"
+        split.map(
+            _extract,
+            remove_columns=["audio"],
+            cache_file_name=partial_path,
+            load_from_cache_file=False,
+            desc=f"Extracting features ({split_name})",
+        )
+        os.replace(partial_path, final_path)
+        print(f"Wrote features for {split_name} to {final_path}", file=sys.stderr)
+
+
+def load_feature_cache(cache_path: str, source_splits: list[str]) -> Dataset:
+    """Load a feature cache as one memory-mapped dataset, source splits in order.
+
+    Columns not shared by every source split are dropped, so sources whose
+    splits carry different extra columns still concatenate.
+    """
+    parts = [
+        Dataset.from_file(os.path.join(cache_path, f"{split_name}.arrow"))
+        for split_name in source_splits
+    ]
+    if len(parts) == 1:
+        return parts[0]
+
+    shared = [
+        column for column in parts[0].column_names
+        if all(column in part.column_names for part in parts[1:])
+    ]
+    return concatenate_datasets([part.select_columns(shared) for part in parts])
+
+
+# ---------------------------------------------------------------------------
+# Text and labels
+# ---------------------------------------------------------------------------
+
+def normalize_texts(texts: list[str], preprocessing_config: DictConfig) -> list[str]:
+    """Apply the configured text normalization to a list of transcripts."""
+    normalizer = build_text_normalizer(preprocessing_config)
+    return [normalizer(text) for text in texts]
+
+
+def encode_labels(
+    texts: list[str],
+    tokenizer,
+    indices: list[int],
+) -> list[list[int]]:
+    """Encode the transcripts at `indices`; every other row gets an empty label.
+
+    Only the rows that are actually used are encoded -- an excluded transcriber
+    or a held-out English test set may hold characters the training vocabulary
+    lacks, and there is no reason to spend time on rows that are discarded.
+
+    Args:
+        texts: Normalized transcripts, one per example.
+        tokenizer: The run's tokenizer.
+        indices: Rows to encode.
 
     Returns:
-        DatasetDict with at least 'train' and 'dev' splits.
+        One label list per example.
     """
-    has_dev = any(
-        key not in ("train", "test") for key in dataset.keys()
-    )
-    if has_dev:
-        return dataset
+    labels: list[list[int]] = [[] for _ in texts]
+    for index in indices:
+        labels[index] = tokenizer(texts[index]).input_ids
+    return labels
+
+
+# ---------------------------------------------------------------------------
+# Split assignment and assembly
+# ---------------------------------------------------------------------------
+
+def default_assignment(
+    source_splits: list[str],
+    dev_size: float | int,
+    seed: int = 1,
+) -> dict[str, list[int]]:
+    """Assign examples to splits from the source's own split names.
+
+    Used when no metadata split is configured. Every source split keeps its
+    name. If the source has no split other than `train` and `test`, a dev split
+    is sampled from `train` -- by example, exactly as `train_test_split` with
+    this seed always has, so a vocabulary cached under the old pipeline still
+    corresponds to the same training rows.
+
+    Args:
+        source_splits: Each example's source split name, in feature-cache order.
+        dev_size: Fraction (0-1) or absolute number of dev examples.
+        seed: Random seed for the dev sample.
+
+    Returns:
+        `{split: example indices}`.
+    """
+    assignment: dict[str, list[int]] = {}
+    for index, split_name in enumerate(source_splits):
+        assignment.setdefault(split_name, []).append(index)
+
+    has_dev = any(name not in ("train", "test") for name in assignment)
+    if has_dev or "train" not in assignment:
+        return assignment
 
     if dev_size < 1:
         test_size = dev_size
     else:
         test_size = int(dev_size)
 
-    splits = dataset["train"].train_test_split(test_size=test_size, seed=seed)
-    result = DatasetDict({"train": splits["train"], "dev": splits["test"]})
-    if "test" in dataset:
-        result["test"] = dataset["test"]
-    return result
+    train_indices = Dataset.from_dict({"index": assignment["train"]})
+    halves = train_indices.train_test_split(test_size=test_size, seed=seed)
+    assignment["train"] = halves["train"]["index"]
+    assignment["dev"] = halves["test"]["index"]
+    return assignment
 
 
-# ---------------------------------------------------------------------------
-# Two-stage preparation
-# ---------------------------------------------------------------------------
-
-def normalize_dataset(
-    dataset: DatasetDict,
-    preprocessing_config: DictConfig,
-) -> DatasetDict:
-    """Stage 1: Apply text normalization to transcriptions."""
-    normalizer = build_text_normalizer(preprocessing_config)
-
-    for split_name in dataset:
-        dataset[split_name] = dataset[split_name].map(
-            lambda example: {"transcription": normalizer(example["transcription"])}
-        )
-
-    return dataset
-
-
-def prepare_dataset_for_training(
-    dataset: DatasetDict,
-    processor: ProcessorMixin,
-    model_type: str,
-    sampling_rate: int = 16000,
+def assemble_splits(
+    features: Dataset,
+    assignment: dict[str, list[int]],
+    labels: list[list[int]],
+    input_column: str,
+    sampling_rate: int,
     max_audio_length_seconds: float | None = None,
     max_label_length: int | None = None,
-    processed_path: str | None = None,
 ) -> DatasetDict:
-    """Stage 2: Feature extraction + label encoding.
+    """Combine cached features with this run's labels and select each split.
 
-    Pre-extracts and caches features so they are not recomputed each epoch.
-    For models whose front end learns from raw audio (wav2vec2, HuBERT,
-    W2V-BERT) this assumes that front end is frozen — otherwise the cached
-    features go stale after the first weight update, and the entry point
-    enforces the constraint at startup. Models with a deterministic front end
-    (Whisper's mel spectrogram) are unaffected.
+    Nothing here rewrites the features: the labels are attached as an in-memory
+    column beside the memory-mapped cache, and each split is an index selection
+    over the result.
 
     Args:
-        dataset: Normalized DatasetDict with {audio, transcription} columns.
-        processor: The combined processor (feature extractor + tokenizer).
-        model_type: Model type key for looking up input_column.
-        sampling_rate: Target audio sampling rate.
-        max_audio_length_seconds: Filter out audio longer than this.
-        max_label_length: Filter out examples whose encoded labels exceed this
-            many tokens. Needed for seq2seq decoders with a hard positional
-            limit (Whisper: 448).
-        processed_path: If provided, the directory to cache the processed
-            dataset in. Callers pass a per-configuration subcache (see
-            `artifact_configs.processed_cache_dirname`) so that caches for
-            different models coexist instead of invalidating each other.
+        features: The loaded feature cache.
+        assignment: `{split: example indices}`.
+        labels: One encoded label list per example.
+        input_column: The features column.
+        sampling_rate: Rate the features were extracted at, for the audio
+            length filter.
+        max_audio_length_seconds: Drop examples with longer audio.
+        max_label_length: Drop examples whose labels exceed this many tokens.
+            Needed for seq2seq decoders with a hard positional limit (Whisper:
+            448), which otherwise fail with an index error deep in the forward
+            pass.
 
     Returns:
-        DatasetDict ready for training with model-appropriate input columns.
+        A `DatasetDict` with `input_column`, `input_length`, `labels` and
+        `label_length` per split.
     """
-    if processed_path and os.path.exists(processed_path):
-        print(f"Loading cached processed dataset from {processed_path}", file=sys.stderr)
-        return DatasetDict.load_from_disk(processed_path)
+    input_lengths = features["input_length"]
+    max_samples = None
+    if max_audio_length_seconds is not None:
+        max_samples = int(max_audio_length_seconds * sampling_rate)
 
-    spec = get_model_spec(model_type)
-    input_column = spec.input_column
+    label_lengths = [len(label) for label in labels]
+    with_labels = concatenate_datasets(
+        [
+            features.select_columns([input_column, "input_length"]),
+            Dataset.from_dict({"labels": labels, "label_length": label_lengths}),
+        ],
+        axis=1,
+    )
 
-    for split_name in dataset:
-        split = _cast_and_filter_audio(
-            dataset[split_name],
-            sampling_rate=sampling_rate,
-            max_audio_length_seconds=max_audio_length_seconds,
-            split_name=split_name,
-        )
-        split = _feature_extract_and_encode(
-            split,
-            processor=processor,
-            input_column=input_column,
-            sampling_rate=sampling_rate,
-        )
-        dataset[split_name] = _filter_long_labels(
-            split,
-            max_label_length=max_label_length,
-            split_name=split_name,
-        )
+    result = DatasetDict()
+    for split_name, indices in assignment.items():
+        kept = []
+        too_long_audio = 0
+        too_long_labels = 0
+        for index in indices:
+            if max_samples is not None and input_lengths[index] > max_samples:
+                too_long_audio += 1
+            elif max_label_length is not None and label_lengths[index] > max_label_length:
+                too_long_labels += 1
+            else:
+                kept.append(index)
 
-    if processed_path:
-        os.makedirs(processed_path, exist_ok=True)
-        dataset.save_to_disk(processed_path)
-        print(f"Saved processed dataset to {processed_path}", file=sys.stderr)
+        if too_long_audio:
+            print(
+                f"Filtered {split_name}: removed {too_long_audio} examples "
+                f"> {max_audio_length_seconds}s",
+                file=sys.stderr,
+            )
+        if too_long_labels:
+            print(
+                f"Filtered {split_name}: removed {too_long_labels} examples "
+                f"with > {max_label_length} label tokens",
+                file=sys.stderr,
+            )
+        result[split_name] = with_labels.select(kept, keep_in_memory=True)
 
-    return dataset
+    return result
 
 
 def _cast_and_filter_audio(
