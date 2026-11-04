@@ -552,7 +552,7 @@ def setup_processor(
         A processor combining the feature extractor and tokenizer.
     """
     spec = get_model_spec(args.model.type)
-    feature_extractor = _build_feature_extractor(args, spec)
+    feature_extractor = build_feature_extractor(args, spec)
 
     processor = spec.processor_class(
         feature_extractor=feature_extractor,
@@ -567,7 +567,7 @@ def setup_processor(
     return processor
 
 
-def _build_feature_extractor(args: DictConfig, spec: ModelSpec):
+def build_feature_extractor(args: DictConfig, spec: ModelSpec):
     """Build the feature extractor from config or load it from the checkpoint.
 
     Checkpoint-sourced extractors (Whisper) carry parameters the model depends

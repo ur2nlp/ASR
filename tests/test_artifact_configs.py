@@ -17,12 +17,12 @@ from omegaconf import OmegaConf
 from src.sources import source_config_record
 from src.artifact_configs import (
     ArtifactConfig,
+    FeatureCacheConfig,
     ModelConfig,
-    ProcessedDatasetConfig,
     dict_diff,
-    processed_cache_dirname,
     warn_on_legacy_processed_cache,
 )
+from src.processors import build_feature_extractor, get_model_spec
 
 
 class TestDictDiff:
@@ -206,13 +206,13 @@ class TestPairedDoesNotKeyOnColumnNames:
 class TestPreprocessingIsRecordedOnTheStageItAffects:
     """Regression guard for a mis-stated dependency.
 
-    The untokenized cache is written from the raw source *before*
-    `normalize_dataset` runs, so text normalization cannot change it. The
-    processed cache holds label-encoded transcripts, so normalization changes
-    it completely. Recording it on the untokenized stage meant a preprocessing
-    change hard-failed a cache it could not affect, while the cache it did
-    affect was reused silently -- `ProcessedDatasetConfig` did not track it and
-    `processed_cache_dirname` did not either, so nothing noticed.
+    The untokenized cache is written from the raw source *before* text
+    normalization runs, so normalization cannot change it. Recording it there
+    meant a preprocessing change hard-failed a cache it could not affect. The
+    same holds for the feature cache now: labels are encoded per run from
+    freshly normalized text and are not cached at all, so preprocessing must
+    not key the features either -- a punctuation tweak must not force a
+    re-extraction.
     """
 
     def test_untokenized_record_ignores_preprocessing(self, base_config):
@@ -229,20 +229,16 @@ class TestPreprocessingIsRecordedOnTheStageItAffects:
         assert source_config_record(base_config.dataset, base_config.seed) == \
             source_config_record(other.dataset, other.seed)
 
-    def test_processed_record_tracks_preprocessing(self, base_config):
+    def test_feature_record_ignores_preprocessing(self, base_config):
         other = base_config.copy()
         other.preprocessing.remove_punctuation = not base_config.preprocessing.remove_punctuation
 
-        assert ProcessedDatasetConfig.from_args(base_config, 32).to_dict() != \
-            ProcessedDatasetConfig.from_args(other, 32).to_dict()
+        assert _feature_config(base_config).dirname() == _feature_config(other).dirname()
 
 
-class TestProcessedDatasetConfig:
-    def test_from_args(self, base_config):
-        config = ProcessedDatasetConfig.from_args(base_config, vocab_size=32)
-        d = config.to_dict()
-        assert d["model_type"] == "wav2vec2"
-        assert d["vocab_size"] == 32
+def _feature_config(args) -> FeatureCacheConfig:
+    extractor = build_feature_extractor(args, get_model_spec(args.model.type))
+    return FeatureCacheConfig.from_args(args, extractor)
 
 
 class TestModelConfig:
@@ -253,109 +249,65 @@ class TestModelConfig:
         assert "training_config" in d
 
 
-class TestProcessedCacheDirname:
-    """Per-configuration processed subcache naming.
+class TestFeatureCacheConfig:
+    """The shared feature cache is keyed on the audio and the extractor only.
 
-    The name must distinguish every configuration that produces different
-    cached features or labels, so that caches for different models coexist
-    under one dataset instead of invalidating each other.
+    Everything else -- tokenizer, FOCUS vocabulary, language token, label and
+    audio length limits, split assignment -- is applied per run by index, so it
+    must *not* key the cache, or runs that could share the features would each
+    extract their own copy.
     """
 
-    @staticmethod
-    def _args(model: dict, dataset: dict = None, sampling_rate: int = 16000):
-        return OmegaConf.create(
-            {
-                "model": model,
-                "audio": {"sampling_rate": sampling_rate},
-                "dataset": dataset or {},
-            }
-        )
+    def test_records_extractor_and_source(self, base_config):
+        record = _feature_config(base_config).to_dict()
+        assert record["input_column"] == "input_values"
+        assert record["sampling_rate"] == 16000
+        assert record["feature_extractor"]["do_normalize"] is True
+        assert record["source"]["type"] == "huggingface"
 
-    def test_ctc_model_name(self):
-        args = self._args(
-            {"type": "wav2vec2", "short_name": "xlsr300m"},
-            {"max_audio_length_seconds": 30.0},
-        )
-        assert processed_cache_dirname(args) == "processed_xlsr300m_sr16k_a30"
+    def test_drops_private_extractor_keys(self, base_config):
+        record = _feature_config(base_config).to_dict()
+        assert not any(key.startswith("_") for key in record["feature_extractor"])
 
-    def test_whisper_name_includes_label_limit_and_language(self):
-        args = self._args(
-            {
-                "type": "whisper",
-                "short_name": "whisper_small",
-                "language": "af",
-                "task": "transcribe",
-            },
-            {"max_audio_length_seconds": 30.0, "max_label_length": 448},
-        )
-        assert processed_cache_dirname(args) == (
-            "processed_whisper-small_sr16k_a30_l448_af-transcribe"
-        )
+    def test_name_names_the_extractor(self, base_config):
+        name = _feature_config(base_config).dirname()
+        assert name.startswith("features_wav2vec2featureextractor_")
+        assert "/" not in name
 
-    def _focus_args(self, vocab_size=4096, short_name="whisper-medium-zu"):
-        args = self._args(
-            {"type": "whisper", "short_name": short_name,
-             "language": "sw", "task": "transcribe"},
-            {"max_audio_length_seconds": 30.0, "max_label_length": 448},
-        )
-        args.focus = OmegaConf.create({
-            "enabled": True, "vocab_size": vocab_size,
-            "tokenizer_algorithm": None, "character_coverage": 1.0,
-            "num_samples": None,
-        })
-        return args
+    def test_shared_across_models_with_the_same_extractor(self, base_config):
+        other = base_config.copy()
+        other.model.short_name = "another-model"
+        other.model.pretrained_name = "facebook/wav2vec2-base"
+        assert _feature_config(base_config).dirname() == _feature_config(other).dirname()
 
-    def test_the_focus_suffix_does_not_repeat_the_model(self):
-        """The name opens with the model slug; the FOCUS segment must not re-add it.
+    def test_ignores_length_limits(self, base_config):
+        other = base_config.copy()
+        other.dataset.max_audio_length_seconds = 10.0
+        other.dataset.max_label_length = 448
+        assert _feature_config(base_config).dirname() == _feature_config(other).dirname()
 
-        It used to append the whole `tokenizer_id`, which ends with that slug,
-        giving `processed_whisper-medium-zu_..._focus-v4k-whisper-medium-zu`.
-        """
-        name = processed_cache_dirname(self._focus_args())
-        assert name == "processed_whisper-medium-zu_sr16k_a30_l448_sw-transcribe_focus-v4k"
-        assert name.count("whisper-medium-zu") == 1
+    def test_ignores_the_split_configuration(self, base_config):
+        other = base_config.copy()
+        other.split = {"enabled": True, "test": {"speaker": ["S01"]}}
+        other.dataset.dev_size = 0.3
+        assert _feature_config(base_config).dirname() == _feature_config(other).dirname()
 
-    def test_vocabulary_sizes_still_get_separate_caches(self):
-        """Dropping the model must not collapse two vocabularies together."""
-        assert processed_cache_dirname(self._focus_args(2048)) != \
-            processed_cache_dirname(self._focus_args(4096))
+    def test_extractor_settings_change_the_cache(self, base_config):
+        other = base_config.copy()
+        other.audio.do_normalize = False
+        assert _feature_config(base_config).dirname() != _feature_config(other).dirname()
 
-    def test_models_still_get_separate_caches_under_focus(self):
-        """The leading slug is what separates them now."""
-        assert processed_cache_dirname(self._focus_args(short_name="whisper-medium-zu")) != \
-            processed_cache_dirname(self._focus_args(short_name="whisper-small-zu"))
+    def test_source_changes_the_cache(self, base_config):
+        other = base_config.copy()
+        other.dataset.name = "another_dataset"
+        assert _feature_config(base_config).dirname() != _feature_config(other).dirname()
 
-    def test_different_models_get_different_caches(self):
-        dataset = {"max_audio_length_seconds": 30.0}
-        ctc = processed_cache_dirname(
-            self._args({"type": "wav2vec2", "short_name": "xlsr300m"}, dataset)
-        )
-        whisper = processed_cache_dirname(
-            self._args(
-                {"type": "whisper", "short_name": "whisper_small", "language": "af"},
-                dataset,
-            )
-        )
-        assert ctc != whisper
-
-    def test_language_change_gets_a_different_cache(self):
-        """Whisper's language token changes every cached label."""
-        base = {"type": "whisper", "short_name": "whisper_small", "task": "transcribe"}
-        afrikaans = processed_cache_dirname(self._args({**base, "language": "af"}))
-        swahili = processed_cache_dirname(self._args({**base, "language": "sw"}))
-        assert afrikaans != swahili
-
-    def test_omits_unset_optional_fields(self):
-        args = self._args({"type": "wav2vec2", "short_name": "xlsr300m"})
-        assert processed_cache_dirname(args) == "processed_xlsr300m_sr16k"
-
-    def test_falls_back_to_model_type_without_short_name(self):
-        args = self._args({"type": "hubert"})
-        assert processed_cache_dirname(args) == "processed_hubert_sr16k"
-
-    def test_name_is_filesystem_safe(self):
-        args = self._args({"type": "whisper", "short_name": "openai/whisper-small"})
-        assert "/" not in processed_cache_dirname(args)
+    def test_source_splits_do_not_change_the_name(self, base_config):
+        """They are only known after reading the source, after the name is needed."""
+        config = _feature_config(base_config)
+        before = config.dirname()
+        config.source_splits = ["train", "test"]
+        assert config.dirname() == before
 
 
 class TestLegacyProcessedCacheWarning:
@@ -363,6 +315,14 @@ class TestLegacyProcessedCacheWarning:
         os.makedirs(tmp_path / "processed")
         warn_on_legacy_processed_cache(str(tmp_path))
         assert "old layout" in capsys.readouterr().err
+
+    def test_warns_on_per_model_processed_subcaches(self, tmp_path, capsys):
+        os.makedirs(tmp_path / "processed_whisper-small_sr16k_a30")
+        os.makedirs(tmp_path / "features_whisperfeatureextractor_0123abcd")
+        warn_on_legacy_processed_cache(str(tmp_path))
+        err = capsys.readouterr().err
+        assert "processed_whisper-small_sr16k_a30" in err
+        assert "features_" not in err.split("Features now")[0]
 
     def test_silent_when_absent(self, tmp_path, capsys):
         warn_on_legacy_processed_cache(str(tmp_path))

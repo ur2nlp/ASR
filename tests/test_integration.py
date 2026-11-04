@@ -15,8 +15,7 @@ from omegaconf import OmegaConf
 
 from src.data import (
     DataCollatorCTCWithPadding,
-    ensure_train_dev_split,
-    normalize_dataset,
+    normalize_texts,
 )
 from src.metrics import make_compute_metrics, preprocess_logits_for_metrics
 from src.preprocessing import build_text_normalizer
@@ -82,8 +81,7 @@ class TestVocabPipeline:
         assert len(encoded) > 0
 
     def test_normalize_then_vocab(self, synthetic_dataset, preprocessing_cfg, tmp_dir):
-        dataset = normalize_dataset(synthetic_dataset, preprocessing_cfg)
-        texts = dataset["train"]["transcription"]
+        texts = normalize_texts(synthetic_dataset["train"]["transcription"], preprocessing_cfg)
 
         vocab = generate_vocab(texts)
         vocab_path = os.path.join(tmp_dir, "vocab.json")

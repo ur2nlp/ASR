@@ -1,0 +1,3 @@
+# No metadata split: use the source's own train/dev/test splits, sampling dev
+# from train (by example, `dataset.dev_size`) when the source has none.
+enabled: false

@@ -10,10 +10,14 @@ from omegaconf import OmegaConf
 
 from src.data import (
     DataCollatorCTCWithPadding,
-    ensure_train_dev_split,
+    assemble_splits,
+    build_feature_cache,
+    default_assignment,
+    encode_labels,
     load_dataset_from_config,
     load_external_eval_sets,
-    normalize_dataset,
+    load_feature_cache,
+    normalize_texts,
 )
 from src.sources.base import standardize_columns
 from src.sources.paired import PairedDataset
@@ -61,38 +65,33 @@ class TestStandardizeColumns:
         assert "transcription" in result["train"].column_names
 
 
-class TestEnsureTrainDevSplit:
+class TestDefaultAssignment:
     def test_creates_dev_split(self):
-        ds = DatasetDict({
-            "train": Dataset.from_dict({"text": list(range(100))}),
-        })
-        result = ensure_train_dev_split(ds, dev_size=0.2)
-        assert "dev" in result
-        assert "train" in result
+        result = default_assignment(["train"] * 100, dev_size=0.2)
         assert len(result["dev"]) == 20
+        assert len(result["train"]) == 80
+        assert set(result["train"]).isdisjoint(result["dev"])
+
+    def test_matches_train_test_split(self):
+        """Same partition the old split produced, so a cached vocab stays valid."""
+        old = Dataset.from_dict({"text": list(range(100))}).train_test_split(
+            test_size=0.2, seed=1
+        )
+        result = default_assignment(["train"] * 100, dev_size=0.2, seed=1)
+        assert sorted(result["dev"]) == sorted(old["test"]["text"])
 
     def test_preserves_existing_dev(self):
-        ds = DatasetDict({
-            "train": Dataset.from_dict({"text": [1, 2, 3]}),
-            "dev": Dataset.from_dict({"text": [4, 5]}),
-        })
-        result = ensure_train_dev_split(ds, dev_size=0.5)
-        assert len(result["dev"]) == 2
+        result = default_assignment(["train"] * 3 + ["dev"] * 2, dev_size=0.5)
+        assert result["dev"] == [3, 4]
+        assert result["train"] == [0, 1, 2]
 
     def test_preserves_test_split(self):
-        ds = DatasetDict({
-            "train": Dataset.from_dict({"text": list(range(100))}),
-            "test": Dataset.from_dict({"text": [101, 102]}),
-        })
-        result = ensure_train_dev_split(ds, dev_size=10)
-        assert "test" in result
-        assert len(result["test"]) == 2
+        result = default_assignment(["train"] * 100 + ["test"] * 2, dev_size=10)
+        assert result["test"] == [100, 101]
+        assert len(result["dev"]) == 10
 
     def test_absolute_dev_size(self):
-        ds = DatasetDict({
-            "train": Dataset.from_dict({"text": list(range(100))}),
-        })
-        result = ensure_train_dev_split(ds, dev_size=15)
+        result = default_assignment(["train"] * 100, dev_size=15)
         assert len(result["dev"]) == 15
 
 
@@ -199,22 +198,90 @@ class TestLoadPaired:
         assert len(cached["train"]) == 1
 
 
-class TestNormalizeDataset:
+class TestNormalizeTexts:
     def test_applies_normalization(self, preprocessing_config):
-        ds = DatasetDict({
-            "train": Dataset.from_dict({"transcription": ["Hello, World!"]}),
-        })
-        result = normalize_dataset(ds, preprocessing_config)
-        assert result["train"]["transcription"][0] == "hello world"
+        assert normalize_texts(["Hello, World!"], preprocessing_config) == ["hello world"]
 
-    def test_multiple_splits(self, preprocessing_config):
-        ds = DatasetDict({
-            "train": Dataset.from_dict({"transcription": ["Hello"]}),
-            "test": Dataset.from_dict({"transcription": ["World!"]}),
-        })
-        result = normalize_dataset(ds, preprocessing_config)
-        assert result["train"]["transcription"][0] == "hello"
-        assert result["test"]["transcription"][0] == "world"
+    def test_preserves_order(self, preprocessing_config):
+        assert normalize_texts(["Hello", "World!"], preprocessing_config) == ["hello", "world"]
+
+
+class TestFeatureCachePipeline:
+    """Features are extracted once; labels, splits and filters apply by index."""
+
+    @pytest.fixture
+    def corpus(self, tmp_dir):
+        data_dir = os.path.join(tmp_dir, "data")
+        _write_pair(data_dir, "rec1_000", "hello")
+        _write_pair(data_dir, "rec1_001", "world")
+        _write_pair(data_dir, "rec2_000", "hello world")
+        config = OmegaConf.create({"type": "paired", "path": data_dir})
+        return load_dataset_from_config(config, os.path.join(tmp_dir, "cache"))
+
+    @pytest.fixture
+    def features(self, corpus, tmp_dir, wav2vec2_processor):
+        path = os.path.join(tmp_dir, "cache", "features")
+        build_feature_cache(
+            corpus,
+            wav2vec2_processor.feature_extractor,
+            input_column="input_values",
+            sampling_rate=16000,
+            cache_path=path,
+        )
+        return load_feature_cache(path, ["train"])
+
+    def test_cache_holds_every_example_and_its_basename(self, features):
+        assert len(features) == 3
+        assert features["audio_path"] == ["rec1_000.wav", "rec1_001.wav", "rec2_000.wav"]
+        assert features["source_split"] == ["train"] * 3
+        assert features["transcription"] == ["hello", "world", "hello world"]
+        assert features["input_length"] == [1600] * 3
+
+    def test_nothing_is_written_beside_the_source(self, corpus, features, tmp_dir):
+        untokenized = os.path.join(tmp_dir, "cache", "untokenized", "train")
+        assert not any(name.startswith("cache-") for name in os.listdir(untokenized))
+
+    def test_no_partial_file_left_behind(self, features, tmp_dir):
+        path = os.path.join(tmp_dir, "cache", "features")
+        assert sorted(os.listdir(path)) == ["train.arrow"]
+
+    def test_assemble_selects_and_attaches_labels(
+        self, features, wav2vec2_processor, preprocessing_config
+    ):
+        texts = normalize_texts(features["transcription"], preprocessing_config)
+        assignment = {"train": [0, 2], "test": [1]}
+        labels = encode_labels(texts, wav2vec2_processor.tokenizer, [0, 1, 2])
+        result = assemble_splits(
+            features, assignment, labels, input_column="input_values", sampling_rate=16000
+        )
+        assert result.num_rows == {"train": 2, "test": 1}
+        assert set(result["train"].column_names) == {
+            "input_values", "input_length", "labels", "label_length",
+        }
+        assert result["test"]["labels"][0] == wav2vec2_processor.tokenizer("world").input_ids
+
+    def test_encode_labels_skips_unused_rows(self, wav2vec2_processor):
+        labels = encode_labels(["hello", "world"], wav2vec2_processor.tokenizer, [1])
+        assert labels[0] == []
+        assert labels[1] == wav2vec2_processor.tokenizer("world").input_ids
+
+    def test_length_filters_apply_by_index(self, features, wav2vec2_processor):
+        labels = encode_labels(
+            ["hello", "world", "hello world"], wav2vec2_processor.tokenizer, [0, 1, 2]
+        )
+        too_short_audio = assemble_splits(
+            features, {"train": [0, 1, 2]}, labels,
+            input_column="input_values", sampling_rate=16000,
+            max_audio_length_seconds=0.05,
+        )
+        assert too_short_audio.num_rows == {"train": 0}
+
+        label_limit = assemble_splits(
+            features, {"train": [0, 1, 2]}, labels,
+            input_column="input_values", sampling_rate=16000,
+            max_label_length=5,
+        )
+        assert label_limit.num_rows == {"train": 2}
 
 
 class TestLoadExternalEvalSets:

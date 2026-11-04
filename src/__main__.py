@@ -1,8 +1,9 @@
 """Hydra entry point for ASR fine-tuning.
 
-Orchestrates the full pipeline: cache management → dataset loading →
-text normalization → vocab generation → processor construction →
-model setup → training with callbacks.
+Orchestrates the full pipeline: cache management → shared feature cache →
+split assignment → text normalization → vocab generation → processor
+construction → label encoding → model setup → training with callbacks →
+held-out test evaluation.
 """
 
 import os
@@ -13,27 +14,34 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from transformers.trainer_utils import get_last_checkpoint
 
-from src.artifact_configs import (
-    ProcessedDatasetConfig,
-    processed_cache_dirname,
-    warn_on_legacy_processed_cache,
-)
-from src import focus
+from src.artifact_configs import FeatureCacheConfig, warn_on_legacy_processed_cache
+from src import focus, splits
 from src.callbacks import (
     DelayedEarlyStoppingCallback,
     DetectBrokenLossCallback,
     UnfreezeCallback,
 )
 from src.data import (
-    ensure_train_dev_split,
+    AUDIO_PATH_COLUMN,
+    SOURCE_SPLIT_COLUMN,
+    assemble_splits,
+    build_feature_cache,
+    default_assignment,
+    encode_labels,
     load_dataset_from_config,
     load_external_eval_sets,
-    normalize_dataset,
-    prepare_dataset_for_training,
+    load_feature_cache,
+    normalize_texts,
 )
 from src.metrics import make_compute_metrics, preprocess_logits_for_metrics
 from src.models import setup_model
-from src.processors import ModelSpec, get_model_spec, setup_processor, setup_tokenizer
+from src.processors import (
+    ModelSpec,
+    build_feature_extractor,
+    get_model_spec,
+    setup_processor,
+    setup_tokenizer,
+)
 
 
 OmegaConf.register_new_resolver("divide", lambda x, y: int(x / y), replace=True)
@@ -43,7 +51,9 @@ def _build_output_dir(args: DictConfig) -> str:
     """Build the output directory for this run.
 
     The path encodes the experiment conditions as
-    ``{output_dir}/{id}/{model_short}_{training}``. If ``experiment_id`` is set,
+    ``{output_dir}/{id}/{model_short}_{training}``, followed by the FOCUS
+    vocabulary and the metadata split id when those are enabled. If
+    ``experiment_id`` is set,
     it is appended as a suffix so that repeated runs over the same model and
     training config (e.g. a hyperparameter sweep) do not overwrite each other
     while keeping the descriptive path.
@@ -60,6 +70,11 @@ def _build_output_dir(args: DictConfig) -> str:
     if focus.is_enabled(args):
         base_path = f"{base_path}_{focus.vocabulary_id(args)}"
 
+    # Each fold of a cross-validation is its own experiment; without this they
+    # would all write to one directory.
+    if splits.is_enabled(args):
+        base_path = f"{base_path}_{splits.split_id(args)}"
+
     experiment_id = args.get("experiment_id")
     if experiment_id:
         return f"{base_path}_{experiment_id}"
@@ -70,14 +85,14 @@ def _handle_cache_cleanup(
     args: DictConfig,
     cache_dir: str,
     output_dir: str,
-    processed_path: str,
+    features_path: str,
 ) -> None:
     """Conditionally clear cached artifacts based on fresh_* flags.
 
-    `fresh_processed` clears only this run's own processed subcache, leaving
-    other models' subcaches for the same dataset intact — rebuilding a Whisper
-    cache should not throw away the wav2vec2 one beside it. `fresh_dataset`
-    still clears everything, subcaches included.
+    `fresh_processed` clears only this run's feature cache, leaving caches for
+    other feature extractors intact. Note that the cache is shared by every
+    model with the same extractor (and every split), so it is rebuilt for all of
+    them. `fresh_dataset` still clears everything, split directories included.
     """
     if args.get("fresh_model", False):
         if os.path.exists(output_dir):
@@ -85,9 +100,9 @@ def _handle_cache_cleanup(
             print(f"Cleared model output dir: {output_dir}", file=sys.stderr)
 
     if args.get("fresh_processed", False):
-        if os.path.exists(processed_path):
-            shutil.rmtree(processed_path)
-            print(f"Cleared processed dataset cache: {processed_path}", file=sys.stderr)
+        if os.path.exists(features_path):
+            shutil.rmtree(features_path)
+            print(f"Cleared feature cache: {features_path}", file=sys.stderr)
 
     if args.get("fresh_dataset", False):
         if os.path.exists(cache_dir):
@@ -280,6 +295,91 @@ def _add_external_eval_sets(
     return eval_dict, metric_for_best_model
 
 
+def _load_or_build_features(
+    args: DictConfig,
+    feature_config: FeatureCacheConfig,
+    feature_extractor,
+    features_path: str,
+):
+    """Return the shared feature cache, extracting it first if needed.
+
+    The untokenized source is only resolved when the features have to be
+    built: once they exist, a run never touches the audio again.
+
+    A directory without its `config.yaml` is a build that did not finish; the
+    record is written last, so it is discarded and rebuilt.
+
+    Returns:
+        The loaded features.
+    """
+    config_path = os.path.join(features_path, "config.yaml")
+
+    if os.path.exists(config_path):
+        feature_config.source_splits = list(OmegaConf.load(config_path).source_splits)
+        feature_config.check_cached(config_path)
+        print(f"Loading cached features from {features_path}", file=sys.stderr)
+        return load_feature_cache(features_path, feature_config.source_splits)
+
+    if os.path.isdir(features_path):
+        print(f"Discarding incomplete feature cache at {features_path}", file=sys.stderr)
+        shutil.rmtree(features_path)
+
+    # the cache check, config record and write of the untokenized source belong
+    # to the artifact layer: each source in `src/sources/` declares what its
+    # cache is keyed on, and `resolve()` does the rest
+    source = load_dataset_from_config(args.dataset, args.dataset.cache_dir, seed=args.seed)
+    feature_config.source_splits = list(source.keys())
+    build_feature_cache(
+        source,
+        feature_extractor,
+        input_column=feature_config.input_column,
+        sampling_rate=feature_config.sampling_rate,
+        cache_path=features_path,
+    )
+    feature_config.save(config_path)
+    return load_feature_cache(features_path, feature_config.source_splits)
+
+
+def _assign_splits(args: DictConfig, features, cache_dir: str) -> tuple[str, dict]:
+    """Assign every example to train/dev/test.
+
+    Without a metadata split the source's own splits are used, with dev
+    sampled from train if the source has none; split-dependent artifacts (the
+    CTC vocabulary, a FOCUS tokenizer) then live directly under `cache_dir` as
+    they always have. With one, they live under `cache_dir/splits/<split_id>/`,
+    since each split configuration trains on different rows.
+
+    Returns:
+        A tuple of the directory for split-dependent artifacts and
+        `{split: example indices}`.
+    """
+    source_splits = features[SOURCE_SPLIT_COLUMN]
+    if not splits.is_enabled(args):
+        return cache_dir, default_assignment(source_splits, args.dataset.dev_size, seed=args.seed)
+
+    spec = splits.SplitSpec.from_config(args.split)
+    distinct_sources = sorted(set(source_splits))
+    if len(distinct_sources) > 1:
+        print(
+            f"Note: the source's own splits {distinct_sources} are pooled and "
+            f"reassigned by split.{spec.name}.",
+            file=sys.stderr,
+        )
+
+    key_column = AUDIO_PATH_COLUMN if spec.key_from == "path" else spec.key_from
+    if key_column not in features.column_names:
+        raise ValueError(
+            f"split.key_from={spec.key_from!r} names a column the dataset does not "
+            f"have (columns: {features.column_names})."
+        )
+    key_sources = features[key_column]
+    assignment = splits.assign_splits(key_sources, spec, seed=args.seed)
+
+    split_root = os.path.join(cache_dir, "splits", spec.split_id(args.seed))
+    splits.save_split_record(split_root, spec, args.seed, assignment, key_sources)
+    return split_root, assignment
+
+
 def _validate_config(args: DictConfig, spec: ModelSpec) -> None:
     """Reject config combinations that the architecture cannot honour.
 
@@ -337,62 +437,57 @@ def main(args: DictConfig) -> None:
     cache_dir = args.dataset.cache_dir
     output_dir = _build_output_dir(args)
 
-    # feature extraction and label encoding are model-specific, so each
-    # configuration caches into its own subdirectory beside the shared
-    # untokenized text rather than fighting over a single `processed/`
-    processed_path = os.path.join(cache_dir, processed_cache_dirname(args))
+    # Features depend only on the audio and the feature extractor, so one cache
+    # serves every model sharing that extractor and every split configuration.
+    feature_extractor = build_feature_extractor(args, spec)
+    feature_config = FeatureCacheConfig.from_args(args, feature_extractor)
+    features_path = os.path.join(cache_dir, feature_config.dirname())
 
     # cache cleanup
-    _handle_cache_cleanup(args, cache_dir, output_dir, processed_path)
+    _handle_cache_cleanup(args, cache_dir, output_dir, features_path)
     warn_on_legacy_processed_cache(cache_dir)
 
-    # --- Stage 1: Load and normalize dataset ---
-    # The cache check, config record and write belong to the artifact layer now:
-    # each source in `src/sources/` declares what its cache is keyed on, and
-    # `resolve()` does the rest. Normalization and splitting stay outside it
-    # deliberately -- neither is persisted here, so neither may key this cache.
-    dataset = load_dataset_from_config(args.dataset, cache_dir, seed=args.seed)
-    dataset = normalize_dataset(dataset, args.preprocessing)
-    dataset = ensure_train_dev_split(dataset, args.dataset.dev_size, seed=args.seed)
+    # --- Stage 1: Shared feature cache ---
+    features = _load_or_build_features(args, feature_config, feature_extractor, features_path)
 
-    print(f"Dataset splits: {dict(dataset.num_rows)}", file=sys.stderr)
+    # --- Stage 2: Assign splits and normalize text ---
+    # Everything from here on is per run and by index: nothing rewrites the
+    # cached features.
+    split_root, assignment = _assign_splits(args, features, cache_dir)
+    texts = normalize_texts(features["transcription"], args.preprocessing)
 
-    # --- Stage 2: Build tokenizer and processor ---
+    # --- Stage 3: Build tokenizer and processor ---
     # CTC models generate a character vocab from the training transcripts;
-    # seq2seq models reuse the checkpoint's own subword tokenizer.
-    vocab_dir = os.path.join(cache_dir, "vocab")
+    # seq2seq models reuse the checkpoint's own subword tokenizer, or train a
+    # FOCUS one on the training transcripts. Both live under `split_root`, so
+    # each split configuration gets its own.
+    train_texts = [texts[index] for index in assignment["train"]]
     tokenizer = setup_tokenizer(
         args,
-        train_texts=dataset["train"]["transcription"],
-        vocab_dir=vocab_dir,
-        cache_dir=cache_dir,
+        train_texts=train_texts,
+        vocab_dir=os.path.join(split_root, "vocab"),
+        cache_dir=split_root,
     )
     processor = setup_processor(args, tokenizer)
-    vocab_size = len(tokenizer)
 
-    # --- Stage 3: Process dataset (feature extraction + label encoding) ---
-    # the config lives inside the subcache it describes, so each cache is
-    # self-validating and they cannot invalidate one another
-    processed_config = ProcessedDatasetConfig.from_args(args, vocab_size)
-    processed_config_path = os.path.join(processed_path, "config.yaml")
-    processed_config.check_cached(processed_config_path)
-
-    dataset = prepare_dataset_for_training(
-        dataset,
-        processor,
-        model_type=args.model.type,
+    # --- Stage 4: Encode labels and assemble splits ---
+    used_indices = sorted(index for indices in assignment.values() for index in indices)
+    labels = encode_labels(texts, tokenizer, used_indices)
+    dataset = assemble_splits(
+        features,
+        assignment,
+        labels,
+        input_column=spec.input_column,
         sampling_rate=args.audio.sampling_rate,
         max_audio_length_seconds=args.dataset.get("max_audio_length_seconds"),
         max_label_length=args.dataset.get("max_label_length"),
-        processed_path=processed_path,
     )
+    print(f"Dataset splits: {dict(dataset.num_rows)}", file=sys.stderr)
 
-    processed_config.save(processed_config_path)
+    # --- Stage 5: Setup model ---
+    model = setup_model(args, processor, cache_dir=split_root)
 
-    # --- Stage 4: Setup model ---
-    model = setup_model(args, processor, cache_dir=cache_dir)
-
-    # --- Stage 5: Train ---
+    # --- Stage 6: Train ---
     callbacks = _build_callbacks(args)
     compute_metrics = make_compute_metrics(
         processor,
@@ -459,6 +554,15 @@ def main(args: DictConfig) -> None:
     best_model_dir = os.path.join(output_dir, "best-checkpoint")
     trainer.save_model(best_model_dir)
     processor.save_pretrained(best_model_dir)
+
+    # --- Stage 7: Evaluate the held-out test split (opt-in) ---
+    # Off by default: scoring test at the end of every run invites selecting
+    # runs on it. Only applies when a `test` split exists and was not already
+    # the eval set. `save_metrics` writes `test_results.json` at the run root.
+    if "test" in dataset and eval_split != "test" and args.training.get("evaluate_test", False):
+        test_metrics = trainer.evaluate(dataset["test"], metric_key_prefix="test")
+        trainer.log_metrics("test", test_metrics)
+        trainer.save_metrics("test", test_metrics)
 
     # Write trainer_state.json at the run root. `save_model` does not -- it saves
     # the model and tokenizer only -- and the state it holds is the sole record

@@ -128,6 +128,45 @@ Seq2seq only. A CTC model already derives its vocabulary from your transcripts
 and errors if you enable this. The learned vocabulary size is `focus.vocab_size`;
 the checkpoint's special-token block is kept on top of it.
 
+### Optional: assign splits by metadata (e.g. cross-validation)
+
+To choose train/dev/test by attributes of the files -- hold out one transcriber,
+one speaker, one recording date -- put the attributes in a CSV with one row per
+unit (recording, session, ...) and select rows by value. Copy
+`configs/split/example_metadata.yaml`, point `metadata` at the CSV and
+`key_pattern` at the part of each audio filename that names its row, then:
+
+```bash
+# hold out speaker S01; dev is sampled by whole recording from the rest
+python -m src dataset=<lang> split=<name> 'split.test={speaker: [S01]}'
+
+# one fold per speaker (Hydra multirun); [S03,S04] would hold out both at once
+python -m src -m dataset=<lang> split=<name> 'split.test={speaker:[S01]},{speaker:[S02]}'
+```
+
+A selector is `{column: [values]}` (AND across columns, OR within one); a list
+of them is their OR. `exclude`, `test`, `dev` and `train` all take one. When
+`dev` is not given, dev is sampled as whole `dev_group_by` groups (default: the
+metadata key, e.g. the recording), so segments of one recording never straddle
+train and dev.
+
+Each split configuration gets an id (`<name>-<digest>`, covering the selectors,
+the seed and the metadata file's contents). Its vocabulary or FOCUS tokenizer
+is built from its own training rows under `<cache_dir>/splits/<id>/`, beside
+`split.yaml` and `assignment.csv` (which example went where), and its run
+directory is suffixed with the id. Extracted features are shared by every split.
+
+Only the audio *basename* survives caching, so if basenames are not unique
+across subfolders, set `split.key_from` to a dataset column that identifies
+each example instead.
+
+A test split exists only if you ask for one (`split.test`) or the source ships
+one (e.g. a `test/` subfolder). Set `training.evaluate_test=true` to evaluate the
+best model on it once after training (`test_results.json` in the run
+directory); it is off by default, so test scores are not seen every run. For a
+test set in another folder, see the external eval sets below, or evaluate the
+checkpoint separately.
+
 ### Optional: extra held-out eval sets
 
 To track additional test sets (dialects, recording conditions) alongside the
@@ -242,7 +281,7 @@ Renaming these changes where a run writes, so do it between runs —
 | --- | --- |
 | `training.name` | nothing; it appears only in the run directory |
 | `experiment_id` | rename `outputs/configs/{id}.yaml`, `outputs/trainer_states/{id}.json` and the registry row |
-| `model.short_name` | moves the processed and FOCUS caches — use `tools/migrate_model_short_name.py` |
+| `model.short_name` | moves the FOCUS caches — use `tools/migrate_model_short_name.py` |
 | `dataset.id` | relocates the whole `data/{id}` cache tree; not worth it |
 
 ```bash
