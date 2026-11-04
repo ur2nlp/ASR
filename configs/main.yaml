@@ -5,6 +5,7 @@ defaults:
   - dataset: ???
   - focus: none
   - external_eval: none
+  - split: none
 
 seed: 1
 

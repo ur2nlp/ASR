@@ -1,0 +1,52 @@
+# Template for assigning train/dev/test by metadata attributes.
+#
+# The metadata CSV has one row per unit of the corpus (a recording, a session,
+# ...) and any number of attribute columns. Each example is matched to its row
+# by a key: by default, `key_pattern`'s first group applied to the audio file's
+# basename. Only the basename survives caching, so if basenames are not unique
+# (e.g. spk1/utt001.wav and spk2/utt001.wav), set `key_from` to a dataset column
+# that identifies each example instead.
+#
+# A selector maps columns to accepted values; a row matches when every listed
+# column holds one of its values (AND across columns, OR within one). A list of
+# mappings is the OR of its members.
+#
+# To use: copy to configs/split/<name>.yaml, then e.g.
+#
+#     python -m src dataset=<lang> split=<name> 'split.test={speaker: [S01]}'
+#
+# Quote regex values given on the command line, or Hydra's override parser
+# rejects them: "split.key_pattern='^(.+)_\d+\.wav$'".
+#
+# Each distinct split gets its own id (`name` plus a digest of everything below
+# and of the metadata file's contents). Its vocabulary / FOCUS tokenizer live
+# under <cache_dir>/splits/<split_id>/ and its run directory is suffixed with
+# the id; the extracted features are shared by every split.
+
+enabled: true
+name: example
+
+metadata: data/example/metadata.csv
+key_column: recording
+# `path` (audio basename) or the name of a dataset column.
+key_from: path
+# Group 1 is the key. This default takes the whole basename minus extension; for
+# segments named `{recording}_{index}.wav` use '^(.+)_\d+\.[^.]+$'.
+key_pattern: '^(.+?)\.[^.]+$'
+# Columns whose cells hold several values, e.g. `speakers: S01;S02`.
+multi_valued: []
+multi_value_separator: ";"
+# `error` or `drop` for examples with no metadata row.
+unmatched: error
+
+# Rows dropped from every split.
+exclude: []
+# Rows forming the test split; null for none.
+test: null
+# Rows forming the dev split; null to sample whole `dev_group_by` groups (default:
+# the metadata key) from the non-test rows until `dev_size` examples are reached.
+dev: null
+dev_size: 0.1
+dev_group_by: null
+# Optionally restrict training to matching rows; null for everything left.
+train: null

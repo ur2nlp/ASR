@@ -38,6 +38,10 @@ save_strategy: steps
 save_steps: ${divide:${training.max_steps},100}
 save_total_limit: 2
 load_best_model_at_end: true
+# Opt-in: after training, evaluate the best model once on the `test` split (when
+# there is one and it was not the eval set) and write test_results.json. Off by
+# default so test scores are not seen, and runs selected on them, every run.
+evaluate_test: false
 metric_for_best_model: wer
 greater_is_better: false
 
