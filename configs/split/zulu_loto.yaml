@@ -1,0 +1,42 @@
+# Leave-one-transcriber-out cross-validation for the Zulu corpus.
+#
+# data/zulu/metadata.csv is untracked: it was built once from the
+# non-anonymized file mapping and holds only anonymized ids and speaker codes.
+# Each fold picks its held-out transcriber on the command line, e.g.
+#
+#     DATASET=zulu_whisper MODEL=whisper-small-zu TRAINING=zulu-whisper \
+#         sbatch -J loto-a5761223 scripts/run.sh \
+#         split=zulu_loto 'split.test={transcriber:[a5761223]}' training.evaluate_test=true
+#
+# Folds are the five large transcribers: a5761223, 38f6f23e, c114189d,
+# a5d2e6b9, 71f4256c. The four small ones (82c9f5a9, 3d116106, 03915886,
+# 84bd0cae; 11-33 recordings each) are never held out, so they stay in the
+# training pool.
+#
+# Transcribers are fully crossed with speakers and conversations, so a fold
+# holds out transcription conventions, not voices.
+
+enabled: true
+name: zulu-loto
+
+metadata: data/zulu/metadata.csv
+key_column: recording
+key_from: path
+# tools/prepare_zulu.py names segments {recording}_{NNN}.wav
+key_pattern: '^([0-9a-f]{32})_\d+\.wav$'
+multi_valued: [speakers]
+unmatched: error
+
+# the English test recordings are not on disk; excluded in case they reappear
+exclude: {language: [english]}
+
+# set per fold
+test: ???
+
+# Dev is sampled as whole recording sessions (all 5-minute chunks of one
+# original recording), so adjacent chunks never straddle train and dev.
+dev: null
+dev_size: 0.1
+dev_group_by: session
+
+train: null
