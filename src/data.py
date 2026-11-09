@@ -87,6 +87,7 @@ def load_dataset_from_config(
 
 AUDIO_PATH_COLUMN = "audio_path"
 SOURCE_SPLIT_COLUMN = "source_split"
+EXAMPLE_INDEX_COLUMN = "example_index"
 
 
 def build_feature_cache(
@@ -286,8 +287,10 @@ def assemble_splits(
             pass.
 
     Returns:
-        A `DatasetDict` with `input_column`, `input_length`, `labels` and
-        `label_length` per split.
+        A `DatasetDict` with `input_column`, `input_length`, `labels`,
+        `label_length` and `example_index` (the row in `features`) per split.
+        The collators read only the input and label columns, so the extra
+        columns pass through training untouched.
     """
     input_lengths = features["input_length"]
     max_samples = None
@@ -298,7 +301,13 @@ def assemble_splits(
     with_labels = concatenate_datasets(
         [
             features.select_columns([input_column, "input_length"]),
-            Dataset.from_dict({"labels": labels, "label_length": label_lengths}),
+            Dataset.from_dict({
+                "labels": labels,
+                "label_length": label_lengths,
+                # row in the feature cache, so a prediction can be traced back
+                # to its audio file (and from there to its metadata)
+                EXAMPLE_INDEX_COLUMN: list(range(len(features))),
+            }),
         ],
         axis=1,
     )

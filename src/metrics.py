@@ -14,8 +14,10 @@ supplies these kwargs from the ModelSpec rather than this module branching on
 model type.
 """
 
-import torch
 import evaluate
+import jiwer
+import numpy as np
+import torch
 
 
 # Default decoding conventions, preserved for CTC callers that do not pass
@@ -51,22 +53,12 @@ def make_compute_metrics(
     cer_metric = evaluate.load("cer")
 
     def compute_metrics(pred):
-        pred_ids = pred.predictions
-        label_ids = pred.label_ids
-
-        pad_token_id = processor.tokenizer.pad_token_id
-
-        # replace -100 with pad token id for decoding. The Trainer pads
-        # generated sequences with -100 when batches differ in length, so
-        # predictions need the same treatment as labels under generation.
-        label_ids[label_ids == -100] = pad_token_id
-        pred_ids[pred_ids == -100] = pad_token_id
-
-        pred_str = processor.tokenizer.batch_decode(
-            pred_ids, **prediction_decode_kwargs
-        )
-        label_str = processor.tokenizer.batch_decode(
-            label_ids, **label_decode_kwargs
+        pred_str, label_str = decode_predictions(
+            pred.predictions,
+            pred.label_ids,
+            processor,
+            prediction_decode_kwargs=prediction_decode_kwargs,
+            label_decode_kwargs=label_decode_kwargs,
         )
 
         # filter out empty references to avoid division by zero
@@ -90,6 +82,87 @@ def make_compute_metrics(
         return {"wer": wer, "cer": cer}
 
     return compute_metrics
+
+
+def decode_predictions(
+    pred_ids: np.ndarray,
+    label_ids: np.ndarray,
+    processor,
+    prediction_decode_kwargs: dict | None = None,
+    label_decode_kwargs: dict | None = None,
+) -> tuple[list[str], list[str]]:
+    """Decode predicted and reference token IDs to text, one string per utterance.
+
+    Shared by `compute_metrics` and the per-utterance test output, so that the
+    strings written out are exactly the ones the reported WER was computed on.
+
+    Args:
+        pred_ids: Predicted token IDs. (num_utterances, pred_len)
+        label_ids: Reference token IDs, -100 where padded. (num_utterances, label_len)
+        processor: The combined processor whose tokenizer decodes the IDs.
+        prediction_decode_kwargs: Extra `batch_decode` kwargs for predictions.
+            Defaults to the CTC convention.
+        label_decode_kwargs: Extra `batch_decode` kwargs for references.
+            Defaults to the CTC convention.
+
+    Returns:
+        A tuple of (predictions, references), in utterance order.
+    """
+    if prediction_decode_kwargs is None:
+        prediction_decode_kwargs = DEFAULT_PREDICTION_DECODE_KWARGS
+    if label_decode_kwargs is None:
+        label_decode_kwargs = DEFAULT_LABEL_DECODE_KWARGS
+
+    pad_token_id = processor.tokenizer.pad_token_id
+
+    # replace -100 with the pad token id for decoding. The Trainer pads
+    # generated sequences with -100 when batches differ in length, so
+    # predictions need the same treatment as labels under generation. Copy
+    # first: the Trainer hands the same arrays back to the caller of `predict`.
+    pred_ids = np.where(pred_ids == -100, pad_token_id, pred_ids)
+    label_ids = np.where(label_ids == -100, pad_token_id, label_ids)
+
+    pred_str = processor.tokenizer.batch_decode(pred_ids, **prediction_decode_kwargs)
+    label_str = processor.tokenizer.batch_decode(label_ids, **label_decode_kwargs)
+    return pred_str, label_str
+
+
+def utterance_error_counts(reference: str, hypothesis: str) -> dict:
+    """Count word and character edits for one utterance.
+
+    Corpus WER is total word edits over total reference words, which is how
+    `evaluate`'s `wer` and `cer` aggregate `jiwer`'s per-utterance counts --
+    so summing these over any subset reproduces that subset's WER and CER
+    exactly. That is what makes them useful for bootstrapping and breakdowns,
+    where averaging per-utterance WERs would not be.
+
+    Args:
+        reference: The reference transcript.
+        hypothesis: The model's transcript.
+
+    Returns:
+        `ref_words`, `substitutions`, `deletions`, `insertions` (words), and
+        `ref_chars`, `char_edits` (characters). All zero for an empty
+        reference, which corpus WER skips.
+    """
+    if not reference.strip():
+        return {
+            "ref_words": 0, "substitutions": 0, "deletions": 0, "insertions": 0,
+            "ref_chars": 0, "char_edits": 0,
+        }
+
+    words = jiwer.process_words(reference, hypothesis)
+    characters = jiwer.process_characters(reference, hypothesis)
+    return {
+        "ref_words": words.substitutions + words.deletions + words.hits,
+        "substitutions": words.substitutions,
+        "deletions": words.deletions,
+        "insertions": words.insertions,
+        "ref_chars": characters.substitutions + characters.deletions + characters.hits,
+        "char_edits": (
+            characters.substitutions + characters.deletions + characters.insertions
+        ),
+    }
 
 
 def preprocess_logits_for_metrics(
