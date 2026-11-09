@@ -404,6 +404,18 @@ Useful when the defaults fight you:
 | `--exclude-pattern` | drop runs the state pattern swept up |
 | `--x-axis epoch` | plot against epochs rather than steps |
 | `--dark` | light-on-dark, for slides |
+| `--group NAME=REGEX` | average matching runs into one curve; repeatable |
+| `--band std\|minmax` | shade each group's spread around its mean |
+| `--config plot.yaml` | read options from YAML; command-line flags override it |
+
+Grouping is for seed replicates: `--group "ctc=ctc(-s\d)?\.json"` draws one mean
+curve labeled `ctc (n=3)`. The regex is matched with `re.search` against each
+run's label, so it may match part of a path. The mean is taken only at steps
+every member logged, so a replicate that stopped early truncates the curve (with
+a warning) rather than making it jump. Once a plot needs several groups and
+per-metric limits, put it in a YAML file — keys are the option names, `groups`
+maps each name to a regex or list of regexes, and `ylims` can be a
+`{metric: [lower, upper]}` mapping. `--help` shows a full example.
 
 ## Testing
 
