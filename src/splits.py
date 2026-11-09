@@ -21,6 +21,14 @@ of its members. Columns named in `multi_valued` hold several values separated by
     test: {speaker: [S01, S02], session: [morning]}
     exclude: [{language: [english]}, {speakers: [S09]}]
 
+For a *matched* comparison -- does having transcriber T in training help on
+T's held-out data, at equal training size? -- hold out only part of T
+(`test_size`, by `test_group_by` group), decide what happens to the rest with
+`test_remainder` (`exclude` or `train`), and cap the training set with
+`train_budget: matched`, which sets it to the size the `exclude` variant would
+have. The two variants then share their test and dev sets exactly, and differ
+only in whether T's remaining data replaces an equal amount of everyone else's.
+
 The assignment is pure Python over example indices. It reads nothing but the
 metadata file and the audio basenames, so the expensive cached artifacts --
 audio and extracted features -- are shared by every split configuration, and
@@ -67,6 +75,19 @@ class SplitSpec:
             that no group straddles train and dev. Defaults to `key_column`.
         unmatched: `error` or `drop` -- what to do with an example whose key has
             no metadata row.
+        test_size: Fraction (< 1) or number of the `test`-selected examples to
+            hold out, as whole `test_group_by` groups; None holds out all of them.
+        test_group_by: Column kept whole when sampling test. Defaults to
+            `dev_group_by`, then `key_column`.
+        test_remainder: `exclude` or `train` -- where the `test`-selected
+            examples not drawn into test go. Never into dev, so that both
+            choices share one dev set.
+        train_budget: Cap on the training split: a number (in
+            `train_budget_unit`), `matched` for the size the training split has
+            with `test_remainder: exclude`, or None for no cap. The test
+            remainder, when trained on, is always kept; the rest is filled up
+            to the budget by whole `dev_group_by` groups in seeded random order.
+        train_budget_unit: `hours` (audio duration) or `examples`.
     """
 
     name: str
@@ -83,6 +104,11 @@ class SplitSpec:
     dev_size: float = 0.1
     dev_group_by: str | None = None
     unmatched: str = "error"
+    test_size: float | None = None
+    test_group_by: str | None = None
+    test_remainder: str = "exclude"
+    train_budget: float | str | None = None
+    train_budget_unit: str = "hours"
     metadata_digest: str = field(default="", compare=False)
 
     @classmethod
@@ -97,7 +123,8 @@ class SplitSpec:
 
         Raises:
             FileNotFoundError: If the metadata file does not exist.
-            ValueError: If `unmatched` is not `error` or `drop`.
+            ValueError: If an enumerated option has an unknown value, or the
+                options contradict each other.
         """
         plain = OmegaConf.to_container(split_config, resolve=True)
         metadata = plain["metadata"]
@@ -107,6 +134,30 @@ class SplitSpec:
         unmatched = plain.get("unmatched", "error")
         if unmatched not in ("error", "drop"):
             raise ValueError(f"split.unmatched must be 'error' or 'drop', got {unmatched!r}")
+
+        test_size = plain.get("test_size")
+        test_remainder = plain.get("test_remainder") or "exclude"
+        if test_remainder not in ("exclude", "train"):
+            raise ValueError(
+                f"split.test_remainder must be 'exclude' or 'train', got {test_remainder!r}"
+            )
+        if test_remainder == "train" and test_size is None:
+            raise ValueError(
+                "split.test_remainder=train needs split.test_size: without it every "
+                "test-selected example is held out and there is no remainder to train on."
+            )
+
+        train_budget = plain.get("train_budget")
+        if isinstance(train_budget, str) and train_budget != "matched":
+            raise ValueError(
+                f"split.train_budget must be a number, 'matched' or null, got {train_budget!r}"
+            )
+        train_budget_unit = plain.get("train_budget_unit") or "hours"
+        if train_budget_unit not in ("hours", "examples"):
+            raise ValueError(
+                f"split.train_budget_unit must be 'hours' or 'examples', "
+                f"got {train_budget_unit!r}"
+            )
 
         return cls(
             name=plain.get("name") or "split",
@@ -123,6 +174,11 @@ class SplitSpec:
             dev_size=plain.get("dev_size", 0.1),
             dev_group_by=plain.get("dev_group_by"),
             unmatched=unmatched,
+            test_size=test_size,
+            test_group_by=plain.get("test_group_by"),
+            test_remainder=test_remainder,
+            train_budget=train_budget,
+            train_budget_unit=train_budget_unit,
             metadata_digest=_file_digest(metadata),
         )
 
@@ -145,6 +201,22 @@ class SplitSpec:
             "dev_group_by": self.dev_group_by,
             "unmatched": self.unmatched,
             "seed": seed,
+            # Options added after the first split configs had been run. They are
+            # recorded only when set, so that adding them did not change the id
+            # -- and so the run directory -- of a split that does not use them.
+            **{
+                option: value
+                for option, value in (
+                    ("test_size", self.test_size),
+                    ("test_group_by", self.test_group_by),
+                    ("test_remainder", None if self.test_remainder == "exclude"
+                     else self.test_remainder),
+                    ("train_budget", self.train_budget),
+                    ("train_budget_unit", None if self.train_budget is None
+                     else self.train_budget_unit),
+                )
+                if value is not None
+            },
         }
 
     def split_id(self, seed: int) -> str:
@@ -330,26 +402,44 @@ def assign_splits(
     key_sources: list[str | None],
     spec: SplitSpec,
     seed: int = 1,
+    durations: list[float] | None = None,
+    max_duration: float | None = None,
 ) -> dict[str, list[int]]:
     """Assign example indices to train/dev/test from metadata.
 
-    Order of precedence: `exclude`, then `test`, then `dev` (by selector, or
-    sampled by group from what remains), then `train` (what remains, restricted
-    by the `train` selector if one is given). An example belongs to at most one
-    split.
+    Order of precedence: `exclude`; then `test` (all selected examples, or a
+    `test_size` sample of their groups, leaving a remainder); then `dev` (by
+    selector, or sampled by group from the examples *not* selected for test);
+    then `train` (what remains, restricted by the `train` selector, plus the
+    test remainder when `test_remainder` is `train`, capped by `train_budget`).
+    An example belongs to at most one split.
+
+    Test and dev are drawn before `test_remainder` is consulted, so two specs
+    differing only in it hold out exactly the same test and dev examples.
 
     Args:
         key_sources: Each example's key source in dataset order: its audio
             path when `spec.key_from` is `path`, else its value in that column.
         spec: The split specification.
-        seed: Seed for the grouped dev sample.
+        seed: Seed for the grouped test, dev and budget samples.
+        durations: Each example's audio duration in seconds. Required when
+            `train_budget` is measured in hours; otherwise used only for the
+            log.
+        max_duration: The audio-length filter applied after assignment, in
+            seconds. Longer examples are still assigned, but count nothing
+            toward `train_budget`: they will be dropped, and counting them
+            would let a variant whose extra data is mostly long segments come
+            out short once filtered. Ignored when there is no budget, so it
+            never changes an uncapped assignment.
 
     Returns:
         `{split: sorted example indices}` for each non-empty split.
 
     Raises:
         ValueError: If an example has no metadata row and `unmatched` is
-            `error`, or if the training split comes out empty.
+            `error`, if the training split comes out empty, if an hour budget
+            is set without durations, or if the trained-on test remainder alone
+            exceeds the budget.
     """
     metadata = load_metadata(spec)
     keys = keys_from_values(key_sources, spec.key_pattern, from_paths=spec.key_from == "path")
@@ -368,6 +458,15 @@ def assign_splits(
             file=sys.stderr,
         )
 
+    if spec.train_budget is not None and spec.train_budget_unit == "hours" and durations is None:
+        raise ValueError("split.train_budget in hours needs example durations.")
+
+    def column_of(index: int, column: str) -> tuple[str, ...]:
+        return metadata[keys[index]][column]
+
+    dev_group_column = spec.dev_group_by or spec.key_column
+    test_group_column = spec.test_group_by or dev_group_column
+
     candidates: list[int] = []
     excluded = 0
     for index, key in enumerate(keys):
@@ -380,13 +479,28 @@ def assign_splits(
 
     assignment: dict[str, list[int]] = {"train": [], "dev": [], "test": []}
 
+    # test, and the part of the test selection that is not held out
+    selected: list[int] = []
     remaining: list[int] = []
     for index in candidates:
         if spec.test is not None and matches(metadata[keys[index]], spec.test):
-            assignment["test"].append(index)
+            selected.append(index)
         else:
             remaining.append(index)
 
+    test_remainder: list[int] = []
+    if spec.test_size is None:
+        assignment["test"] = selected
+    else:
+        groups = [column_of(index, test_group_column) for index in selected]
+        test_mask = _sample_groups(groups, spec.test_size, seed)
+        for index, in_test in zip(selected, test_mask):
+            if in_test:
+                assignment["test"].append(index)
+            else:
+                test_remainder.append(index)
+
+    # dev, from the examples not selected for test
     if spec.dev is not None:
         rest: list[int] = []
         for index in remaining:
@@ -396,8 +510,7 @@ def assign_splits(
                 rest.append(index)
         remaining = rest
     else:
-        group_column = spec.dev_group_by or spec.key_column
-        groups = [metadata[keys[index]][group_column] for index in remaining]
+        groups = [column_of(index, dev_group_column) for index in remaining]
         dev_mask = _sample_groups(groups, spec.dev_size, seed)
         rest = []
         for index, in_dev in zip(remaining, dev_mask):
@@ -407,19 +520,112 @@ def assign_splits(
                 rest.append(index)
         remaining = rest
 
-    for index in remaining:
-        if spec.train is None or matches(metadata[keys[index]], spec.train):
-            assignment["train"].append(index)
+    # train
+    pool = [
+        index for index in remaining
+        if spec.train is None or matches(metadata[keys[index]], spec.train)
+    ]
+    kept_remainder: list[int] = []
+    if spec.test_remainder == "train":
+        kept_remainder = [
+            index for index in test_remainder
+            if spec.train is None or matches(metadata[keys[index]], spec.train)
+        ]
+
+    def budget_size(index: int) -> float:
+        """An example's contribution to the budget, zero if it will be filtered."""
+        if (
+            max_duration is not None
+            and durations is not None
+            and durations[index] > max_duration
+        ):
+            return 0.0
+        if spec.train_budget_unit == "examples":
+            return 1.0
+        return durations[index] / 3600.0
+
+    def size_of(indices: list[int]) -> float:
+        return sum(budget_size(index) for index in indices)
+
+    if spec.train_budget is None:
+        filled = pool
+    else:
+        if spec.train_budget == "matched":
+            budget = size_of(pool)
+        else:
+            budget = float(spec.train_budget)
+        mandatory = size_of(kept_remainder)
+        if mandatory > budget:
+            raise ValueError(
+                f"The trained-on test remainder alone ({mandatory:.2f} "
+                f"{spec.train_budget_unit}) exceeds split.train_budget "
+                f"({budget:.2f}). Raise the budget or test_size."
+            )
+        groups = [column_of(index, dev_group_column) for index in pool]
+        sizes = [budget_size(index) for index in pool]
+        fill_mask = _fill_to_budget(groups, budget - mandatory, seed, sizes)
+        filled = [index for index, keep in zip(pool, fill_mask) if keep]
+    assignment["train"] = sorted(filled + kept_remainder)
 
     if not assignment["train"]:
         raise ValueError("The split configuration leaves no training examples.")
 
     counts = ", ".join(f"{name}={len(indices)}" for name, indices in assignment.items())
+    if durations is not None:
+        hours = ", ".join(
+            f"{name}={sum(durations[index] for index in indices) / 3600.0:.2f}h"
+            for name, indices in assignment.items()
+        )
+        counts = f"{counts}; {hours}"
+    # held-out remainder not trained on, plus pool examples cut by the budget
+    unused = len(test_remainder) - len(kept_remainder) + len(pool) - len(filled)
     print(
-        f"Split {spec.split_id(seed)}: {counts} (excluded={excluded})",
+        f"Split {spec.split_id(seed)}: {counts} (excluded={excluded}, unused={unused})",
         file=sys.stderr,
     )
     return {name: indices for name, indices in assignment.items() if indices}
+
+
+def _fill_to_budget(
+    groups: list[tuple[str, ...]],
+    budget: float,
+    seed: int,
+    sizes: list[float] | None = None,
+) -> list[bool]:
+    """Pick examples, whole groups at a time in seeded random order, up to a budget.
+
+    Groups are shuffled and their examples taken in order until the running
+    total reaches `budget`, so the result overshoots by at most one example.
+    The last group taken may be partial. That is harmless here: what is left
+    out is not used anywhere, so a split group cannot leak between splits.
+
+    Args:
+        groups: Each example's group value.
+        budget: Target total size.
+        seed: Shuffle seed.
+        sizes: Each example's size; None counts every example as 1.
+
+    Returns:
+        A per-example mask, True for kept.
+    """
+    if sizes is None:
+        sizes = [1.0] * len(groups)
+
+    members: dict[tuple[str, ...], list[int]] = {}
+    for position, group in enumerate(groups):
+        members.setdefault(group, []).append(position)
+    ordered = sorted(members, key=str)
+    random.Random(seed).shuffle(ordered)
+
+    keep = [False] * len(groups)
+    total = 0.0
+    for group in ordered:
+        for position in members[group]:
+            if total >= budget:
+                return keep
+            keep[position] = True
+            total += sizes[position]
+    return keep
 
 
 def _sample_groups(
@@ -471,6 +677,7 @@ def save_split_record(
     seed: int,
     assignment: dict[str, list[int]],
     key_sources: list[str | None],
+    durations: list[float] | None = None,
 ) -> None:
     """Write what produced this split, and which example went where.
 
@@ -485,12 +692,19 @@ def save_split_record(
         seed: Global seed.
         assignment: `{split: example indices}`.
         key_sources: Each example's key source, as given to `assign_splits`.
+        durations: Each example's audio duration in seconds, to record each
+            split's hours; omitted from the record when None.
     """
     os.makedirs(split_root, exist_ok=True)
 
     record = spec.record(seed)
     record["split_id"] = spec.split_id(seed)
     record["counts"] = {name: len(indices) for name, indices in assignment.items()}
+    if durations is not None:
+        record["hours"] = {
+            name: round(sum(durations[index] for index in indices) / 3600.0, 3)
+            for name, indices in assignment.items()
+        }
     with open(os.path.join(split_root, "split.yaml"), "w", encoding="utf-8") as record_file:
         yaml.safe_dump(record, record_file, sort_keys=False)
 

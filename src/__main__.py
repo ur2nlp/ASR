@@ -373,10 +373,22 @@ def _assign_splits(args: DictConfig, features, cache_dir: str) -> tuple[str, dic
             f"have (columns: {features.column_names})."
         )
     key_sources = features[key_column]
-    assignment = splits.assign_splits(key_sources, spec, seed=args.seed)
+    # `input_length` is the raw audio length in samples at the extraction rate
+    durations = [
+        length / args.audio.sampling_rate for length in features["input_length"]
+    ]
+    assignment = splits.assign_splits(
+        key_sources,
+        spec,
+        seed=args.seed,
+        durations=durations,
+        max_duration=args.dataset.get("max_audio_length_seconds"),
+    )
 
     split_root = os.path.join(cache_dir, "splits", spec.split_id(args.seed))
-    splits.save_split_record(split_root, spec, args.seed, assignment, key_sources)
+    splits.save_split_record(
+        split_root, spec, args.seed, assignment, key_sources, durations=durations
+    )
     return split_root, assignment
 
 

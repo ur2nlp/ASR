@@ -50,3 +50,25 @@ dev_size: 0.1
 dev_group_by: null
 # Optionally restrict training to matching rows; null for everything left.
 train: null
+
+# --- Partial holdout and training-size control --------------------------------
+# Hold out only part of the `test` selection: a fraction (< 1) or number of its
+# examples, as whole `test_group_by` groups (default: dev_group_by, then the
+# key). null holds out all of it.
+test_size: null
+test_group_by: null
+# Where the test-selected examples *not* held out go: `exclude` or `train`.
+# Never dev, so both choices share one dev set (and one test set).
+test_remainder: exclude
+# Cap the training split: a number, `matched` (the size it would have with
+# test_remainder=exclude), or null. A trained-on remainder is always kept; the
+# rest is filled by whole dev_group_by groups in seeded random order.
+#
+# Matched pair for "does T's own data help on T's held-out data?":
+#   'split.test={t:[T]}' split.test_size=0.5 split.train_budget=matched
+#   + split.test_remainder=exclude   (without T)
+#   + split.test_remainder=train     (with T: T's remainder replaces an equal
+#                                     amount of everyone else's)
+train_budget: null
+# `hours` (audio duration) or `examples`.
+train_budget_unit: hours
