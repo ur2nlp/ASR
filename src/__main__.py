@@ -6,6 +6,7 @@ construction → label encoding → model setup → training with callbacks →
 held-out test evaluation.
 """
 
+import json
 import os
 import shutil
 import sys
@@ -23,6 +24,7 @@ from src.callbacks import (
 )
 from src.data import (
     AUDIO_PATH_COLUMN,
+    EXAMPLE_INDEX_COLUMN,
     SOURCE_SPLIT_COLUMN,
     assemble_splits,
     build_feature_cache,
@@ -33,7 +35,12 @@ from src.data import (
     load_feature_cache,
     normalize_texts,
 )
-from src.metrics import make_compute_metrics, preprocess_logits_for_metrics
+from src.metrics import (
+    decode_predictions,
+    make_compute_metrics,
+    preprocess_logits_for_metrics,
+    utterance_error_counts,
+)
 from src.models import setup_model
 from src.processors import (
     ModelSpec,
@@ -392,6 +399,58 @@ def _assign_splits(args: DictConfig, features, cache_dir: str) -> tuple[str, dic
     return split_root, assignment
 
 
+def _write_test_predictions(
+    path: str,
+    prediction_output,
+    test_dataset,
+    features,
+    processor,
+    spec: ModelSpec,
+) -> None:
+    """Write one JSON record per test utterance.
+
+    Each record carries the utterance's audio basename (`example`, the key back
+    to any metadata) and its row in the feature cache (`example_index`), the
+    normalized `reference` and the model's `hypothesis` -- decoded exactly as
+    the reported WER decoded them -- and word / character edit counts.
+
+    Summing the counts over any subset reproduces that subset's WER and CER,
+    which is what session-level bootstrap confidence intervals and per-group
+    breakdowns need; averaging per-utterance WERs would not.
+
+    Args:
+        path: Output file (JSON Lines).
+        prediction_output: The `PredictionOutput` from `trainer.predict`.
+        test_dataset: The test split it was computed on, in the same order.
+        features: The feature cache, for the audio basenames.
+        processor: The run's processor, for decoding.
+        spec: The architecture's `ModelSpec`, for its decoding conventions.
+    """
+    hypotheses, references = decode_predictions(
+        prediction_output.predictions,
+        prediction_output.label_ids,
+        processor,
+        prediction_decode_kwargs=spec.prediction_decode_kwargs,
+        label_decode_kwargs=spec.label_decode_kwargs,
+    )
+    example_indices = test_dataset[EXAMPLE_INDEX_COLUMN]
+    audio_paths = features[AUDIO_PATH_COLUMN]
+
+    with open(path, "w", encoding="utf-8") as predictions_file:
+        for example_index, reference, hypothesis in zip(
+            example_indices, references, hypotheses
+        ):
+            record = {
+                "example": audio_paths[example_index],
+                "example_index": example_index,
+                "reference": reference,
+                "hypothesis": hypothesis,
+                **utterance_error_counts(reference, hypothesis),
+            }
+            predictions_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"Wrote {len(references)} test predictions to {path}", file=sys.stderr)
+
+
 def _validate_config(args: DictConfig, spec: ModelSpec) -> None:
     """Reject config combinations that the architecture cannot honour.
 
@@ -570,11 +629,20 @@ def main(args: DictConfig) -> None:
     # --- Stage 7: Evaluate the held-out test split (opt-in) ---
     # Off by default: scoring test at the end of every run invites selecting
     # runs on it. Only applies when a `test` split exists and was not already
-    # the eval set. `save_metrics` writes `test_results.json` at the run root.
+    # the eval set. `save_metrics` writes `test_results.json` at the run root;
+    # `test_predictions.jsonl` beside it holds one record per utterance.
     if "test" in dataset and eval_split != "test" and args.training.get("evaluate_test", False):
-        test_metrics = trainer.evaluate(dataset["test"], metric_key_prefix="test")
-        trainer.log_metrics("test", test_metrics)
-        trainer.save_metrics("test", test_metrics)
+        test_output = trainer.predict(dataset["test"], metric_key_prefix="test")
+        trainer.log_metrics("test", test_output.metrics)
+        trainer.save_metrics("test", test_output.metrics)
+        _write_test_predictions(
+            os.path.join(output_dir, "test_predictions.jsonl"),
+            test_output,
+            dataset["test"],
+            features,
+            processor,
+            spec,
+        )
 
     # Write trainer_state.json at the run root. `save_model` does not -- it saves
     # the model and tokenizer only -- and the state it holds is the sole record

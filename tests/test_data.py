@@ -256,9 +256,11 @@ class TestFeatureCachePipeline:
         )
         assert result.num_rows == {"train": 2, "test": 1}
         assert set(result["train"].column_names) == {
-            "input_values", "input_length", "labels", "label_length",
+            "input_values", "input_length", "labels", "label_length", "example_index",
         }
         assert result["test"]["labels"][0] == wav2vec2_processor.tokenizer("world").input_ids
+        assert result["train"]["example_index"] == [0, 2]
+        assert result["test"]["example_index"] == [1]
 
     def test_encode_labels_skips_unused_rows(self, wav2vec2_processor):
         labels = encode_labels(["hello", "world"], wav2vec2_processor.tokenizer, [1])

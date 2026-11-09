@@ -162,8 +162,11 @@ each example instead.
 
 A test split exists only if you ask for one (`split.test`) or the source ships
 one (e.g. a `test/` subfolder). Set `training.evaluate_test=true` to evaluate the
-best model on it once after training (`test_results.json` in the run
-directory); it is off by default, so test scores are not seen every run. For a
+best model on it once after training: `test_results.json` in the run
+directory, plus `test_predictions.jsonl` with each utterance's audio file,
+reference, hypothesis and word/character edit counts (sum the counts over any
+subset to get its WER/CER, e.g. for bootstrap confidence intervals). It is off
+by default, so test scores are not seen every run. For a
 test set in another folder, see the external eval sets below, or evaluate the
 checkpoint separately.
 
