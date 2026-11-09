@@ -1,0 +1,35 @@
+# Matched-pair transcriber holdout for the Zulu corpus.
+#
+# For each large transcriber T, half of T's sessions are held out as test (the
+# same half in both variants), and two models are trained to the same number
+# of usable audio hours with the same dev set:
+#
+#   test_remainder=exclude  without T: trains on the other transcribers only
+#   test_remainder=train    with T:    T's other half replaces an equal amount
+#                                      of the other transcribers' data
+#
+# Their WER difference on T's test half is the effect of T's own data at equal
+# training size. Example pair:
+#
+#     DATASET=zulu_whisper MODEL=whisper-small-zu TRAINING=zulu-whisper \
+#         sbatch -J match-a5761223-without scripts/run.sh split=zulu_matched \
+#         'split.test={transcriber:[a5761223]}' split.test_remainder=exclude \
+#         training.evaluate_test=true
+#     (same with -J match-a5761223-with and split.test_remainder=train)
+#
+# Hours are counted after the audio-length filter (max_audio_length_seconds),
+# which removes 42-63% of the hours of 38f6f23e, 71f4256c and a5d2e6b9 under
+# Whisper's 30 s limit. See .claude/zulu_loto.md.
+
+defaults:
+  - zulu_loto
+  - _self_
+
+name: zulu-matched
+
+test_size: 0.5
+test_group_by: session
+# set per run: exclude (without T) or train (with T)
+test_remainder: ???
+train_budget: matched
+train_budget_unit: hours
