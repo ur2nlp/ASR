@@ -4,6 +4,7 @@ import csv
 import os
 
 import pytest
+import yaml
 from omegaconf import OmegaConf
 
 from src.splits import (
@@ -228,3 +229,168 @@ class TestSplitRecord:
         test_rows = {row["example"] for row in rows if row["split"] == "test"}
         assert test_rows == {"r3_000.wav", "r3_001.wav"}
         assert os.path.exists(os.path.join(root, "split.yaml"))
+
+
+class TestMatchedHoldout:
+    """Partial test holdout, remainder routing and training budgets."""
+
+    # 3 transcribers x 4 sessions x 3 recordings, 2 segments each; T = "A"
+    ROWS = [
+        {
+            "recording": f"{transcriber}{session}r{recording}",
+            "transcriber": transcriber,
+            "session": f"{transcriber}{session}",
+        }
+        for transcriber in ("A", "B", "C")
+        for session in range(4)
+        for recording in range(3)
+    ]
+    PATHS = [f"{row['recording']}_{index:03d}.wav" for row in ROWS for index in range(2)]
+    # vary durations so hour and example budgets differ
+    DURATIONS = [float(3 + (position % 5)) for position in range(len(PATHS))]
+
+    def _spec(self, tmp_dir, **overrides) -> SplitSpec:
+        config = {
+            "enabled": True,
+            "name": "matched",
+            "metadata": _write_metadata(tmp_dir, self.ROWS),
+            "key_pattern": SEGMENT_PATTERN,
+            "test": {"transcriber": ["A"]},
+            "test_size": 0.5,
+            "dev_size": 0.2,
+            "dev_group_by": "session",
+            "train_budget": "matched",
+        }
+        config.update(overrides)
+        return SplitSpec.from_config(OmegaConf.create(config))
+
+    def _assign(self, spec):
+        return assign_splits(self.PATHS, spec, seed=1, durations=self.DURATIONS)
+
+    def _hours(self, indices) -> float:
+        return sum(self.DURATIONS[index] for index in indices) / 3600.0
+
+    def _sessions(self, indices) -> set[str]:
+        return {self.PATHS[index][:2] for index in indices}
+
+    def _transcribers(self, indices) -> set[str]:
+        return {self.PATHS[index][0] for index in indices}
+
+    def test_partial_test_keeps_groups_whole(self, tmp_dir):
+        result = self._assign(self._spec(tmp_dir))
+        test_sessions = self._sessions(result["test"])
+        assert self._transcribers(result["test"]) == {"A"}
+        assert 0 < len(test_sessions) < 4
+
+    def test_pair_shares_test_and_dev(self, tmp_dir):
+        without = self._assign(self._spec(tmp_dir, test_remainder="exclude"))
+        with_t = self._assign(self._spec(tmp_dir, test_remainder="train"))
+        assert without["test"] == with_t["test"]
+        assert without["dev"] == with_t["dev"]
+
+    def test_dev_never_holds_the_held_out_transcriber(self, tmp_dir):
+        result = self._assign(self._spec(tmp_dir, test_remainder="train"))
+        assert "A" not in self._transcribers(result["dev"])
+
+    def test_without_variant_trains_on_no_t(self, tmp_dir):
+        result = self._assign(self._spec(tmp_dir, test_remainder="exclude"))
+        assert "A" not in self._transcribers(result["train"])
+
+    def test_with_variant_trains_on_the_whole_remainder(self, tmp_dir):
+        result = self._assign(self._spec(tmp_dir, test_remainder="train"))
+        a_train = self._sessions([i for i in result["train"] if self.PATHS[i][0] == "A"])
+        a_test = self._sessions(result["test"])
+        assert a_train == {f"A{session}" for session in range(4)} - a_test
+
+    def test_matched_budget_equalizes_hours(self, tmp_dir):
+        without = self._assign(self._spec(tmp_dir, test_remainder="exclude"))
+        with_t = self._assign(self._spec(tmp_dir, test_remainder="train"))
+        longest = max(self.DURATIONS) / 3600.0
+        assert abs(self._hours(with_t["train"]) - self._hours(without["train"])) <= longest
+
+    def test_budget_ignores_examples_the_length_filter_drops(self, tmp_dir):
+        """Matching must hold *after* filtering, when T's segments are long."""
+        durations = [
+            40.0 if path.startswith("A") and index % 2 == 0 else duration
+            for index, (path, duration) in enumerate(zip(self.PATHS, self.DURATIONS))
+        ]
+
+        def surviving_hours(result):
+            return sum(durations[i] for i in result["train"] if durations[i] <= 30) / 3600
+
+        results = {
+            remainder: assign_splits(
+                self.PATHS,
+                self._spec(tmp_dir, test_remainder=remainder),
+                seed=1,
+                durations=durations,
+                max_duration=30.0,
+            )
+            for remainder in ("exclude", "train")
+        }
+        difference = surviving_hours(results["train"]) - surviving_hours(results["exclude"])
+        assert abs(difference) <= max(self.DURATIONS) / 3600.0
+
+    def test_matched_budget_in_examples(self, tmp_dir):
+        overrides = {"train_budget_unit": "examples"}
+        without = self._assign(self._spec(tmp_dir, test_remainder="exclude", **overrides))
+        with_t = self._assign(self._spec(tmp_dir, test_remainder="train", **overrides))
+        assert len(with_t["train"]) == len(without["train"])
+
+    def test_matched_is_a_no_op_without_remainder(self, tmp_dir):
+        capped = self._assign(self._spec(tmp_dir))
+        uncapped = self._assign(self._spec(tmp_dir, train_budget=None))
+        assert capped["train"] == uncapped["train"]
+
+    def test_numeric_budget_caps_training(self, tmp_dir):
+        spec = self._spec(tmp_dir, train_budget=10, train_budget_unit="examples")
+        assert len(self._assign(spec)["train"]) == 10
+
+    def test_remainder_larger_than_budget_is_an_error(self, tmp_dir):
+        spec = self._spec(
+            tmp_dir, test_remainder="train", train_budget=1, train_budget_unit="examples"
+        )
+        with pytest.raises(ValueError, match="exceeds"):
+            self._assign(spec)
+
+    def test_hour_budget_needs_durations(self, tmp_dir):
+        with pytest.raises(ValueError, match="durations"):
+            assign_splits(self.PATHS, self._spec(tmp_dir), seed=1)
+
+    def test_remainder_train_needs_test_size(self, tmp_dir):
+        with pytest.raises(ValueError, match="test_size"):
+            self._spec(tmp_dir, test_remainder="train", test_size=None)
+
+    def test_unknown_budget_word_rejected(self, tmp_dir):
+        with pytest.raises(ValueError, match="train_budget"):
+            self._spec(tmp_dir, train_budget="half")
+
+    def test_variants_get_different_ids(self, tmp_dir):
+        without = self._spec(tmp_dir, test_remainder="exclude").split_id(seed=1)
+        with_t = self._spec(tmp_dir, test_remainder="train").split_id(seed=1)
+        assert without != with_t
+
+
+class TestIdStability:
+    def test_new_options_absent_from_record_when_unset(self, tmp_dir):
+        """Adding the options must not change the id of a split that ignores them.
+
+        Run directories are named by split id, so a changed id would orphan
+        every fold already trained.
+        """
+        record = _spec(tmp_dir, test={"transcriber": ["A"]}).record(seed=1)
+        for option in (
+            "test_size", "test_group_by", "test_remainder",
+            "train_budget", "train_budget_unit",
+        ):
+            assert option not in record
+
+    def test_split_record_has_hours_when_given_durations(self, tmp_dir):
+        spec = _spec(tmp_dir, test={"transcriber": ["B"]})
+        durations = [3600.0] * len(AUDIO_PATHS)
+        assignment = assign_splits(AUDIO_PATHS, spec, durations=durations)
+        root = os.path.join(tmp_dir, "record")
+        save_split_record(root, spec, 1, assignment, AUDIO_PATHS, durations=durations)
+        with open(os.path.join(root, "split.yaml")) as handle:
+            record = yaml.safe_load(handle)
+        assert record["hours"]["test"] == 2.0
