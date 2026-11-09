@@ -41,6 +41,26 @@ Usage:
 
     # Mix a shared default (--ylim) with per-metric overrides (--ylims wins for named metrics)
     python tools/training_plot.py --metrics loss eval_loss grad_norm --state-file path/to/trainer_state.json --ylim 0 10 --ylims eval_loss:1:3
+
+    # Average seed replicates into one curve per group (regex matched against run labels),
+    # shading the members' range; runs matched by no group are drawn individually
+    python tools/training_plot.py --metric eval_wer --state-pattern "outputs/trainer_states/.*\\.json" \\
+        --group "ctc=ctc(-s\\d)?\\.json" --group "whisper=whisper(-s\\d)?\\.json" --band minmax
+
+    # Read options from a YAML file (keys are option names); command-line options override it
+    python tools/training_plot.py --config plot.yaml --output plot.png
+
+Example plot.yaml:
+
+    state_pattern: 'outputs/trainer_states/(ctc|whisper)(-s\\d)?\\.json'
+    metrics: [loss, eval_wer, 'eval_.*_wer']
+    groups:
+      ctc: 'ctc(-s\\d)?\\.json'
+      whisper: ['whisper\\.json', 'whisper-s[23]\\.json']
+    band: minmax           # none | std | minmax
+    ylims:
+      eval_wer: [0, 0.8]
+      loss: [null, 3]      # null = auto bound
 """
 
 from lapt_core.plotting import main
