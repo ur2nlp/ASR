@@ -19,6 +19,14 @@ dependencies:
   # 0.11, soundfile 0.14, jiwer 4.0, evaluate 0.4.6, numba 0.67, transformers.
   # pyctcdecode is the sole blocker, verified by pip resolution 2026-09-22.
   - numpy<2.0
+  # Follows from the numpy cap, so remove both together. pyarrow 26 needs
+  # numpy>=2 at import time. conda-forge's pyarrow-core records that and would
+  # never pick it here, but the PyPI wheel does not declare it, so any pip-only
+  # install (a CI job, a plain venv) pairs pyarrow 26 with numpy 1.26 and every
+  # `datasets` import fails. That is exactly what broke LAPT's CI in 2026-11.
+  # Not set in lapt-core: it pins neither numpy nor pyarrow, and capping one
+  # there would hold back consumers that run numpy 2.
+  - pyarrow<26
   - plotnine
   - pyctcdecode
   - pytest
