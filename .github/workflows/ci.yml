@@ -1,0 +1,116 @@
+name: CI
+
+# Modelled on LAPT's .github/workflows/ci.yml. No branch filter: this is the
+# framework template, and project branches (which fork from here) should get
+# the same checks without editing this file.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the in-flight run obsolete; cancel it
+# rather than paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Deliberately does not install the project: ruff is a static analyzer, so
+      # this job reports well before the test job has finished downloading torch.
+      - name: Install ruff
+        run: pip install "ruff>=0.16"
+
+      - name: Lint
+        run: ruff check --output-format=github .
+
+      # Advisory until a formatting pass is adopted repo-wide. Exits 0 and
+      # reports through a warning annotation instead of using
+      # continue-on-error, which would leave a bare "exit code 1" annotation on
+      # an otherwise-green run.
+      - name: Check formatting drift (advisory)
+        run: |
+          if ruff format --check . > format-check.txt 2>&1; then
+            echo "::notice::Formatting is clean."
+          else
+            drift=$(grep -oE '^[0-9]+ files? would be reformatted' format-check.txt || echo "some files would be reformatted")
+            echo "::warning::Advisory, not blocking: $drift."
+          fi
+          cat format-check.txt
+
+  test:
+    name: test (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: environment.yml
+
+      # The CPU wheels are ~200MB against ~2.5GB for the default CUDA build, and
+      # the runners have no GPU. Installed first so the requirements install
+      # below sees torch and torchaudio already satisfied and does not pull the
+      # CUDA variants.
+      - name: Install CPU torch
+        run: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      # environment.yml stays the single source of truth: derive a pip
+      # requirements file from it rather than keeping a second list that can
+      # drift. Every conda package here has the same name on PyPI, so the only
+      # translation needed is conda's single `=` to pip's `==`.
+      #
+      # This is deliberately a pip-only install. It is the path that broke
+      # LAPT's CI when pyarrow 26 shipped (the PyPI wheel needs numpy>=2 without
+      # declaring it), so it is the path worth guarding; conda resolves that
+      # conflict on its own.
+      - name: Install dependencies from environment.yml
+        run: |
+          pip install pyyaml
+          python - <<'EOF'
+          import re
+          import yaml
+
+          with open("environment.yml") as env_file:
+              environment = yaml.safe_load(env_file)
+
+          requirements = []
+          for dependency in environment["dependencies"]:
+              if isinstance(dependency, dict):
+                  requirements.extend(dependency["pip"])
+                  continue
+              name = re.split(r"[<>=!]", dependency, maxsplit=1)[0]
+              if name in ("python", "pip"):
+                  continue
+              requirements.append(re.sub(r"(?<![<>=!])=(?!=)", "==", dependency))
+
+          with open("ci-requirements.txt", "w") as requirements_file:
+              requirements_file.write("\n".join(requirements) + "\n")
+          EOF
+          cat ci-requirements.txt
+          pip install -r ci-requirements.txt
+
+      # The `network` tests download openai/whisper-small (~1GB); cache it so
+      # only the first run on a given key pays for it.
+      - name: Cache HuggingFace assets
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-whisper-small
+          restore-keys: hf-${{ runner.os }}-
+
+      - name: Run tests
+        run: pytest -q --durations=10
