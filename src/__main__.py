@@ -15,8 +15,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from transformers.trainer_utils import get_last_checkpoint
 
-from src.artifact_configs import FeatureCacheConfig, warn_on_legacy_processed_cache
 from src import focus, splits
+from src.artifact_configs import FeatureCacheConfig, warn_on_legacy_processed_cache
 from src.callbacks import (
     DelayedEarlyStoppingCallback,
     DetectBrokenLossCallback,
@@ -49,7 +49,6 @@ from src.processors import (
     setup_processor,
     setup_tokenizer,
 )
-
 
 OmegaConf.register_new_resolver("divide", lambda x, y: int(x / y), replace=True)
 

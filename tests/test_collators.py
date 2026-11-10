@@ -16,7 +16,6 @@ from src.collators import (
 from src.processors import setup_processor
 from src.vocab import create_ctc_tokenizer
 
-
 DECODER_START_TOKEN_ID = 3
 
 

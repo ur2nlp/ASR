@@ -50,7 +50,7 @@ def main():
             split = dataset
         texts = split[args.text_column]
     else:
-        with open(args.text_source, "r", encoding="utf-8") as f:
+        with open(args.text_source, encoding="utf-8") as f:
             texts = [line.strip() for line in f if line.strip()]
 
     print(f"Collected {len(texts)} sentences for LM training", file=sys.stderr)

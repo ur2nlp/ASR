@@ -8,7 +8,7 @@ checkpoint is left to integration testing so the unit suite stays network-free.
 import pytest
 import torch
 from omegaconf import OmegaConf
-from transformers import WhisperConfig, Wav2Vec2Config
+from transformers import Wav2Vec2Config, WhisperConfig
 
 from src.models import (
     _build_config_overrides,

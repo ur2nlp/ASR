@@ -40,11 +40,11 @@ from transformers import (
 )
 
 from src import focus
+from src.artifact_configs import FocusTokenizerConfig
 from src.collators import (
     DataCollatorCTCWithPadding,
     DataCollatorSpeechSeq2SeqWithPadding,
 )
-from src.artifact_configs import FocusTokenizerConfig
 from src.vocab import create_ctc_tokenizer, generate_vocab, save_vocab
 
 

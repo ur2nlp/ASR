@@ -9,7 +9,6 @@ from datasets import Audio, Dataset, DatasetDict
 from omegaconf import OmegaConf
 
 from src.data import (
-    DataCollatorCTCWithPadding,
     assemble_splits,
     build_feature_cache,
     default_assignment,
@@ -19,9 +18,9 @@ from src.data import (
     load_feature_cache,
     normalize_texts,
 )
+from src.processors import setup_processor
 from src.sources.base import standardize_columns
 from src.sources.paired import PairedDataset
-from src.processors import setup_processor
 from src.vocab import create_ctc_tokenizer
 
 

@@ -1,6 +1,5 @@
 """Tests for src/vocab.py."""
 
-import json
 import os
 
 from src.vocab import create_ctc_tokenizer, generate_vocab, load_vocab, save_vocab

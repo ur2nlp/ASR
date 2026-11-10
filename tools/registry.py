@@ -45,7 +45,6 @@ Usage:
 
 from lapt_core.registry import RegistrySchema, main
 
-
 ASR_SCHEMA = RegistrySchema(
     env_prefix="ASR",
     # sections of the config to flatten into params, with optional prefix stripping

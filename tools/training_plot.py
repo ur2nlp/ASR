@@ -65,6 +65,5 @@ Example plot.yaml:
 
 from lapt_core.plotting import main
 
-
 if __name__ == '__main__':
     main(epilog=__doc__)

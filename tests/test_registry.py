@@ -1,7 +1,6 @@
 """Tests for tools/registry.py — extract_params, upsert_entry, diff_runs."""
 
 import pytest
-
 from lapt_core.registry import (
     categorize_debt,
     diff_runs,

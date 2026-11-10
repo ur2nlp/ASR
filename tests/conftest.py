@@ -4,6 +4,8 @@ import json
 import os
 import tempfile
 
+import pytest
+
 # scikit-learn must be imported before torch. On macOS this environment carries
 # three copies of libomp -- conda's (via llvm-openmp), torch's bundled one, and
 # scikit-learn's in sklearn/.dylibs -- and `import torch` on its own
@@ -16,7 +18,6 @@ import tempfile
 # only sklearn prevents the abort. scikit-learn is guaranteed present as a
 # librosa dependency (librosa requires scikit-learn>=1.1.0).
 import sklearn  # noqa: F401
-import pytest
 from omegaconf import OmegaConf
 
 

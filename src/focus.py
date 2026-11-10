@@ -30,7 +30,6 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import yaml
@@ -38,7 +37,6 @@ from lapt_core.artifacts import config_digest
 from lapt_core.spm import create_bpe_backend, create_unigram_backend
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
-
 
 # Files copied verbatim from the base checkpoint into the new tokenizer
 # directory. `tokenizer.json` is *not* among them -- that is the one file we
@@ -236,7 +234,7 @@ def _sidecar_paths(tokenizer_dir: str, digest: str) -> tuple[str, str, str]:
 def prepare_corpus(
     texts: list[str],
     paths: FocusPaths,
-    num_samples: Optional[int] = None,
+    num_samples: int | None = None,
     seed: int = 1,
 ) -> None:
     """Materialize the target-language corpus in the two formats FOCUS needs.
@@ -295,7 +293,7 @@ def prepare_corpus(
 
 def _sample_texts(
     texts: list[str],
-    num_samples: Optional[int],
+    num_samples: int | None,
     seed: int,
 ) -> list[str]:
     """Take a reproducible subsample of the transcripts, or all of them."""
@@ -697,7 +695,7 @@ def compute_embeddings(
     source_tokenizer: PreTrainedTokenizerBase,
     target_tokenizer: PreTrainedTokenizerBase,
     paths: FocusPaths,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Produce the new embedding matrices, using a cached sidecar when possible.
 
     Args:
@@ -760,7 +758,7 @@ def _load_cached_embeddings(
     input_pt: str,
     output_pt: str,
     has_separate_output: bool,
-) -> Optional[tuple[torch.Tensor, Optional[torch.Tensor]]]:
+) -> tuple[torch.Tensor, torch.Tensor | None] | None:
     """Load a matching embedding sidecar, or return None if there isn't one."""
     if not os.path.exists(input_pt):
         return None
@@ -868,7 +866,7 @@ def _restore_special_token_embeddings(
     source_tokenizer: PreTrainedTokenizerBase,
     target_tokenizer: PreTrainedTokenizerBase,
     input_embeddings: torch.Tensor,
-    output_embeddings: Optional[torch.Tensor],
+    output_embeddings: torch.Tensor | None,
 ) -> None:
     """Copy every inherited special token's embedding across by name, in place.
 
@@ -889,7 +887,7 @@ def _restore_special_token_embeddings(
 
     restored = 0
     missing = []
-    for token, source_id in source_tokenizer.get_added_vocab().items():
+    for token in source_tokenizer.get_added_vocab():
         target_id = target_vocab.get(token)
         if target_id is None:
             missing.append(token)
@@ -919,7 +917,7 @@ def _run_focus(
     target_tokenizer: PreTrainedTokenizerBase,
     corpus_jsonl: str,
     has_separate_output: bool,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Call `deepfocus.FOCUS` for the input and, if untied, output embeddings."""
     try:
         from deepfocus import FOCUS
@@ -1027,7 +1025,7 @@ def _install_embeddings(
     model,
     tokenizer: PreTrainedTokenizerBase,
     input_embeddings: torch.Tensor,
-    output_embeddings: Optional[torch.Tensor],
+    output_embeddings: torch.Tensor | None,
 ) -> None:
     """Resize the model's embedding modules and copy the FOCUS rows into them.
 
