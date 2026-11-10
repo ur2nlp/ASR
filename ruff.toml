@@ -1,0 +1,38 @@
+# Lint configuration, mirroring LAPT's [tool.ruff] block. It lives in ruff.toml
+# because this repository has no pyproject.toml.
+line-length = 100
+target-version = "py310"
+extend-exclude = ["data", "outputs", "models", "tokenizers", "plots"]
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # import sorting
+    "B",   # bugbear (likely bugs)
+    "UP",  # pyupgrade (modern syntax)
+]
+# Same grandfathered set as LAPT. Each entry is a burn-down target, not a
+# permanent exemption.
+ignore = [
+    "E501",  # line-too-long: pending a `ruff format` adoption pass
+    "E402",  # module-import-not-at-top: sys.path setup precedes imports
+    "E741",  # ambiguous-variable-name
+    "E731",  # lambda-assignment
+    "B905",  # zip-without-explicit-strict
+    "B904",  # raise-without-from-inside-except
+    "UP035", # deprecated-import
+]
+
+[lint.isort]
+# Classify explicitly rather than letting ruff infer from directories on disk,
+# so a developer checkout and a clean CI checkout sort imports the same way
+# (LAPT hit this with a gitignored local `tokenizers/` directory).
+known-first-party = ["src", "tools"]
+known-third-party = ["tokenizers"]
+
+[lint.per-file-ignores]
+# Tests re-import module-level names inside test bodies to document what is
+# under test, and bind fixtures that are used only for their side effects.
+"tests/*" = ["F811", "F841", "B017"]
