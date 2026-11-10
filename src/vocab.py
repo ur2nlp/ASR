@@ -71,7 +71,7 @@ def load_vocab(path: str) -> dict[str, int]:
     Returns:
         Character-to-ID mapping.
     """
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 

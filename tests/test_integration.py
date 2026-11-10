@@ -5,21 +5,17 @@ requiring a GPU or real model downloads. It uses a tiny model config and
 synthetic audio data.
 """
 
-import json
 import os
 
 import numpy as np
 import pytest
-from datasets import Audio, Dataset, DatasetDict
+from datasets import Dataset, DatasetDict
 from omegaconf import OmegaConf
 
 from src.data import (
     DataCollatorCTCWithPadding,
     normalize_texts,
 )
-from src.metrics import make_compute_metrics, preprocess_logits_for_metrics
-from src.preprocessing import build_text_normalizer
-from src.processors import get_model_spec
 from src.vocab import create_ctc_tokenizer, generate_vocab, save_vocab
 
 

@@ -12,9 +12,6 @@ import os
 import pytest
 import yaml
 
-from omegaconf import OmegaConf
-
-from src.sources import source_config_record
 from src.artifact_configs import (
     ArtifactConfig,
     FeatureCacheConfig,
@@ -23,6 +20,7 @@ from src.artifact_configs import (
     warn_on_legacy_processed_cache,
 )
 from src.processors import build_feature_extractor, get_model_spec
+from src.sources import source_config_record
 
 
 class TestDictDiff:
@@ -193,8 +191,8 @@ class TestPairedDoesNotKeyOnColumnNames:
         assert "has no effect on a 'paired' source" in capsys.readouterr().err
 
     def test_inherited_defaults_do_not_warn(self):
-        import io as _io
         import contextlib
+        import io as _io
         stderr = _io.StringIO()
         with contextlib.redirect_stderr(stderr):
             source_config_record(

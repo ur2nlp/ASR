@@ -16,8 +16,8 @@ existing `from src.artifact_configs import ...` call sites keep working.
 
 import os
 import sys
-
 from dataclasses import asdict, dataclass, field
+
 from lapt_core.artifacts import ArtifactConfig, config_digest, dict_diff, format_number
 from omegaconf import DictConfig, OmegaConf
 

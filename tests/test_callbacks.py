@@ -1,6 +1,5 @@
 """Tests for src/callbacks.py."""
 
-import math
 from unittest.mock import MagicMock
 
 import pytest

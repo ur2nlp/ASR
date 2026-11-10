@@ -36,7 +36,6 @@ from transformers import AutoModelForCTC, AutoProcessor
 
 from src.decoding import build_processor_with_lm, decode_logits
 
-
 TARGET_SAMPLING_RATE = 16000
 
 

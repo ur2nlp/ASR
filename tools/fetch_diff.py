@@ -23,7 +23,6 @@ Usage:
 
 from lapt_core.fetch_diff import main
 
-
 if __name__ == "__main__":
     # No id normalization: ASR ids come from each run's config verbatim and have
     # no hand-typed variants, so padding would rewrite ids the records never use.

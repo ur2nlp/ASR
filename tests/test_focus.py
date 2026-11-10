@@ -13,7 +13,6 @@ from src.artifact_configs import (
     format_number,
 )
 
-
 sentencepiece = pytest.importorskip("sentencepiece", reason="FOCUS needs sentencepiece")
 
 

@@ -19,7 +19,6 @@ import jiwer
 import numpy as np
 import torch
 
-
 # Default decoding conventions, preserved for CTC callers that do not pass
 # explicit kwargs.
 DEFAULT_PREDICTION_DECODE_KWARGS = {"group_tokens": True}
