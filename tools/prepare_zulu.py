@@ -40,7 +40,6 @@ import sys
 import librosa
 import soundfile as sf
 
-
 TARGET_SAMPLING_RATE = 16000
 
 TIMESTAMP_LINE = re.compile(r"^\[(\d+(?:\.\d+)?)\]\s*$")
