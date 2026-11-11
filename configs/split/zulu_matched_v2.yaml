@@ -1,0 +1,14 @@
+# Matched-pair transcriber holdout (see zulu_matched.yaml) on the v2 corpus
+# (dataset=zulu_v2 / zulu_whisper_v2).
+#
+# v2 adds long-span pieces named {stem}_{index:03d}_{piece:02d}.wav, which the
+# v1 key_pattern rejects (unmatched: error). The v1 configs are left untouched,
+# since key_pattern and name feed the split id and changing them would orphan
+# every v1 run and cache (see CLAUDE.md, "Split ids").
+
+defaults:
+  - zulu_matched
+  - _self_
+
+name: zulu-matched-v2
+key_pattern: '^([0-9a-f]{32})_\d+(?:_\d+)?\.wav$'

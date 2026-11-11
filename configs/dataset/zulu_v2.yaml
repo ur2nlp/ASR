@@ -1,0 +1,21 @@
+# Zulu corpus v2: v1 plus the >30 s spans recovered by forced alignment.
+#
+# Built by
+#
+#     python tools/prepare_zulu.py --output-dir data/zulu/prepared_v2 \
+#         --long-span-manifest outputs/long_span_alignment/manifest.csv
+#
+# Short spans are the same files as in v1; each long span the manifest covers is
+# replaced by its `ok` pieces, named {stem}_{index:03d}_{piece:02d}. See
+# .claude/long_segments.md.
+#
+# Its own `id` (so its own cache root, data/zulu_v2/, and output directories):
+# the corpus changed, so nothing built on v1 may be reused. Split configs for v2
+# need a key_pattern that accepts the piece suffix -- use split=zulu_matched_v2.
+
+defaults:
+  - zulu
+  - _self_
+
+id: zulu_v2
+path: data/zulu/prepared_v2

@@ -1,0 +1,9 @@
+# Zulu corpus v2 (see zulu_v2.yaml) with Whisper's 448-token label limit
+# (see zulu_whisper.yaml).
+
+defaults:
+  - zulu_whisper
+  - _self_
+
+id: zulu_v2
+path: data/zulu/prepared_v2
