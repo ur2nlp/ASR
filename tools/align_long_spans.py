@@ -15,8 +15,9 @@ A span is cut at its longest qualifying pause (preferring cuts that leave both s
 least ``--min-piece-seconds``), recursively, until every piece fits in ``--max-seconds``.
 A piece that still does not fit, because it has no qualifying pause, is marked
 ``too_long`` rather than force-cut. A span whose mean alignment score is below
-``--min-span-score`` (0.35; in validation every badly misaligned pseudo-span scored below
-~0.34) is marked ``low_score`` throughout. Outputs (in ``--output-dir``):
+``--min-span-score`` (0.30) is marked ``low_score`` throughout. With chunked emissions
+(job 2359341), every badly misaligned validation pseudo-span scored below 0.30 and those
+above it kept >= 79% word accuracy (p10 >= 87%), at 40-90, 120-300 and 200-300 s alike. Outputs (in ``--output-dir``):
 
 - ``manifest.csv``: one row per planned piece -- recording, ``span_index`` (the index
   ``prepare_zulu`` uses in ``{stem}_{index:03d}``), piece number, start/end in the
@@ -968,7 +969,7 @@ def parse_args() -> argparse.Namespace:
     align.add_argument(
         "--min-span-score",
         type=float,
-        default=0.35,
+        default=0.30,
         help="spans whose mean alignment score is below this are marked low_score",
     )
     align.add_argument(
