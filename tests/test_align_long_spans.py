@@ -1,11 +1,14 @@
 """Tests for the torch-free parts of tools/align_long_spans.py."""
 
 from tools.align_long_spans import (
+    FRAME_STRIDE_SAMPLES,
     Span,
     WordTiming,
     build_pseudo_spans,
     evaluate_pseudo_span,
     normalize_for_alignment,
+    num_frames,
+    plan_emission_chunks,
     plan_span,
     split_at_pauses,
 )
@@ -213,3 +216,50 @@ class TestPlanSpan:
         timings = [timed(str(index), 2.0 * index, 2.0 * index + 1.9) for index in range(30)]
         rows = self.plan(span, timings)
         assert [row["status"] for row in rows] == ["too_long"]
+
+
+class TestPlanEmissionChunks:
+    SECOND = 16000
+
+    def kept_frames(self, chunks, num_samples):
+        """Clip-level frame indices each chunk keeps, simulating the model's output."""
+        kept = []
+        for chunk in chunks:
+            produced = num_frames(chunk.padded_end - chunk.padded_start)
+            first = chunk.padded_start // FRAME_STRIDE_SAMPLES
+            local = range(produced)[chunk.keep_from :]
+            if chunk.keep_count is not None:
+                local = local[: chunk.keep_count]
+            kept.extend(first + frame for frame in local)
+        return kept
+
+    def test_disabled_is_one_window(self):
+        chunks = plan_emission_chunks(100 * self.SECOND, 0, 2 * self.SECOND)
+        assert len(chunks) == 1
+        assert (chunks[0].padded_start, chunks[0].padded_end) == (0, 100 * self.SECOND)
+
+    def test_short_clip_is_one_window(self):
+        chunks = plan_emission_chunks(40 * self.SECOND, 30 * self.SECOND, 2 * self.SECOND)
+        assert len(chunks) == 1
+
+    def test_stitched_frames_match_whole_clip_exactly(self):
+        # odd lengths, so the clip does not end on the frame grid
+        for num_samples in [46 * self.SECOND + 123, 125 * self.SECOND + 7, 300 * self.SECOND]:
+            chunks = plan_emission_chunks(num_samples, 30 * self.SECOND, 2 * self.SECOND)
+            kept = self.kept_frames(chunks, num_samples)
+            assert kept == list(range(num_frames(num_samples)))
+
+    def test_cores_are_near_target_length(self):
+        num_samples = 300 * self.SECOND
+        chunks = plan_emission_chunks(num_samples, 30 * self.SECOND, 2 * self.SECOND)
+        assert len(chunks) == 10
+        for chunk in chunks[:-1]:
+            core = chunk.keep_count * FRAME_STRIDE_SAMPLES
+            assert 20 * self.SECOND <= core <= 45 * self.SECOND
+
+    def test_context_is_seen_but_not_kept(self):
+        chunks = plan_emission_chunks(90 * self.SECOND, 30 * self.SECOND, 2 * self.SECOND)
+        middle = chunks[1]
+        assert middle.padded_start == 28 * self.SECOND
+        assert middle.padded_end == 62 * self.SECOND
+        assert middle.keep_from == 2 * self.SECOND // FRAME_STRIDE_SAMPLES

@@ -71,6 +71,9 @@ MMS_ALPHABET = set("abcdefghijklmnopqrstuvwxyz'")
 APOSTROPHE_VARIANTS = {"’": "'", "‘": "'", "`": "'"}
 STAR = "*"
 LONG_SPAN_SECONDS = 30.0
+# wav2vec2's convolutional front end: one frame per 320 samples, each seeing 400
+FRAME_STRIDE_SAMPLES = 320
+FRAME_WINDOW_SAMPLES = 400
 
 
 @dataclass
@@ -353,6 +356,78 @@ def evaluate_pseudo_span(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class EmissionChunk:
+    """One window of audio to run the acoustic model on, and which frames to keep.
+
+    The model sees ``[padded_start, padded_end)`` samples; of its output frames, the
+    ``keep_count`` frames from ``keep_from`` on cover the chunk's own core region (None
+    keeps every frame to the end). Every boundary is a multiple of the frame stride, so
+    frame ``k`` of a window is frame ``padded_start / stride + k`` of the whole clip.
+    """
+
+    padded_start: int
+    padded_end: int
+    keep_from: int
+    keep_count: int | None
+
+
+def plan_emission_chunks(
+    num_samples: int,
+    chunk_samples: int,
+    context_samples: int,
+) -> list[EmissionChunk]:
+    """Split a clip into roughly equal cores of about `chunk_samples`, each with context.
+
+    The number of cores is ``round(num_samples / chunk_samples)`` (at least 1), so cores
+    run from 2/3 to 3/2 of the target and no sliver is left at the end. Concatenating the
+    kept frames gives exactly as many frames as running the model on the whole clip.
+
+    Args:
+        num_samples: Clip length in samples.
+        chunk_samples: Target core length in samples; 0 or less disables chunking.
+        context_samples: Extra audio the model sees on each side of a core.
+
+    Returns:
+        The chunks in order.
+    """
+    stride = FRAME_STRIDE_SAMPLES
+    if chunk_samples <= 0:
+        return [EmissionChunk(0, num_samples, 0, None)]
+    num_chunks = max(1, round(num_samples / chunk_samples))
+    context = (context_samples // stride) * stride
+    # core boundaries on the frame grid; the last core runs to the end of the clip
+    boundaries = [
+        round(index * num_samples / num_chunks / stride) * stride for index in range(num_chunks)
+    ]
+    boundaries.append(num_samples)
+
+    chunks = []
+    for index in range(num_chunks):
+        core_start = boundaries[index]
+        core_end = boundaries[index + 1]
+        padded_start = max(0, core_start - context)
+        is_last = index == num_chunks - 1
+        padded_end = num_samples if is_last else min(num_samples, core_end + context)
+        keep_count = None if is_last else (core_end - core_start) // stride
+        chunks.append(
+            EmissionChunk(
+                padded_start=padded_start,
+                padded_end=padded_end,
+                keep_from=(core_start - padded_start) // stride,
+                keep_count=keep_count,
+            )
+        )
+    return chunks
+
+
+def num_frames(num_samples: int) -> int:
+    """Frames wav2vec2's front end produces for a clip of `num_samples`."""
+    if num_samples < FRAME_WINDOW_SAMPLES:
+        return 0
+    return (num_samples - FRAME_WINDOW_SAMPLES) // FRAME_STRIDE_SAMPLES + 1
+
+
 class MmsAligner:
     """Thin wrapper over torchaudio's MMS_FA bundle (model, tokenizer, aligner).
 
@@ -360,13 +435,21 @@ class MmsAligner:
     ``torchaudio.pipelines.MMS_FA`` and ``torchaudio.functional.forced_align``.
     """
 
-    def __init__(self, device: str, star_edges: bool) -> None:
+    def __init__(
+        self,
+        device: str,
+        star_edges: bool,
+        chunk_seconds: float,
+        context_seconds: float,
+    ) -> None:
         import torch
         from torchaudio.pipelines import MMS_FA
 
         self.torch = torch
         self.device = device
         self.star_edges = star_edges
+        self.chunk_samples = int(chunk_seconds * TARGET_SAMPLING_RATE)
+        self.context_samples = int(context_seconds * TARGET_SAMPLING_RATE)
         self.model = MMS_FA.get_model(with_star=True).to(device).eval()
         self.tokenizer = MMS_FA.get_tokenizer()
         self.aligner = MMS_FA.get_aligner()
@@ -396,10 +479,10 @@ class MmsAligner:
         with self.torch.inference_mode():
             # (1, num_samples)
             audio = self.torch.from_numpy(waveform).float().unsqueeze(0).to(self.device)
-            # (1, num_frames, num_labels)
-            emission, _ = self.model(audio)
-            token_spans = self.aligner(emission[0], self.tokenizer(transcript))
-        seconds_per_frame = audio.size(1) / emission.size(1) / TARGET_SAMPLING_RATE
+            # (num_frames, num_labels)
+            emission = self.emissions(audio)
+            token_spans = self.aligner(emission, self.tokenizer(transcript))
+        seconds_per_frame = audio.size(1) / emission.size(0) / TARGET_SAMPLING_RATE
 
         if self.star_edges:
             token_spans = token_spans[1:-1]
@@ -413,6 +496,42 @@ class MmsAligner:
                 score=score,
             )
         return timings
+
+    def emissions(self, audio):
+        """Run the model chunk by chunk and stitch the kept frames together.
+
+        MMS_FA's frame probabilities degrade on very long inputs (span score medians
+        fell from 0.54 at 30-60 s to 0.21 at > 200 s with word accuracy roughly flat),
+        so long clips are scored in ~``chunk_seconds`` windows, each with
+        ``context_seconds`` of audio either side that is seen but not kept.
+
+        Args:
+            audio: (1, num_samples) tensor on the model's device.
+
+        Returns:
+            (num_frames, num_labels) emissions for the whole clip.
+        """
+        pieces = []
+        for chunk in plan_emission_chunks(
+            audio.size(1),
+            self.chunk_samples,
+            self.context_samples,
+        ):
+            # (1, chunk_frames, num_labels)
+            chunk_emission, _ = self.model(audio[:, chunk.padded_start : chunk.padded_end])
+            if chunk.keep_count is None:
+                kept = chunk_emission[0, chunk.keep_from :]
+            else:
+                kept = chunk_emission[0, chunk.keep_from : chunk.keep_from + chunk.keep_count]
+            pieces.append(kept)
+        # (num_frames, num_labels)
+        emission = self.torch.cat(pieces, dim=0)
+        expected = num_frames(audio.size(1))
+        if emission.size(0) != expected:
+            raise RuntimeError(
+                f"chunked emissions have {emission.size(0)} frames, expected {expected}"
+            )
+        return emission
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +614,12 @@ def run_validate(args: argparse.Namespace) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         print("warning: no GPU; alignment will be slow", file=sys.stderr)
-    aligner = MmsAligner(device=device, star_edges=not args.no_star)
+    aligner = MmsAligner(
+        device=device,
+        star_edges=not args.no_star,
+        chunk_seconds=args.chunk_seconds,
+        context_seconds=args.context_seconds,
+    )
 
     recordings = choose_recordings(
         args.raw_dir,
@@ -705,7 +829,12 @@ def run_align(args: argparse.Namespace) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         print("warning: no GPU; alignment will be slow", file=sys.stderr)
-    aligner = MmsAligner(device=device, star_edges=not args.no_star)
+    aligner = MmsAligner(
+        device=device,
+        star_edges=not args.no_star,
+        chunk_seconds=args.chunk_seconds,
+        context_seconds=args.context_seconds,
+    )
 
     recordings = choose_recordings(args.raw_dir, args.metadata, None, args.seed)
     rows: list[dict] = []
@@ -805,6 +934,18 @@ def parse_args() -> argparse.Namespace:
         help="do not wrap the transcript in MMS_FA's '*' wildcard token",
     )
     validate.add_argument("--seed", type=int, default=1)
+    validate.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=30.0,
+        help="score audio in windows of about this length; 0 scores whole clips at once",
+    )
+    validate.add_argument(
+        "--context-seconds",
+        type=float,
+        default=2.0,
+        help="audio the model sees either side of each window but whose frames are dropped",
+    )
     validate.set_defaults(func=run_validate)
 
     align = subparsers.add_parser("align", help="align long spans and plan their cuts")
@@ -838,6 +979,18 @@ def parse_args() -> argparse.Namespace:
     )
     align.add_argument("--no-star", action="store_true")
     align.add_argument("--seed", type=int, default=1)
+    align.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=30.0,
+        help="score audio in windows of about this length; 0 scores whole clips at once",
+    )
+    align.add_argument(
+        "--context-seconds",
+        type=float,
+        default=2.0,
+        help="audio the model sees either side of each window but whose frames are dropped",
+    )
     align.set_defaults(func=run_align)
     return parser.parse_args()
 
