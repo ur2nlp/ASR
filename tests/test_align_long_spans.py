@@ -31,8 +31,19 @@ class TestNormalizeForAlignment:
 class TestBuildPseudoSpans:
     def test_groups_contiguous_spans_until_min_length(self):
         spans = [Span(10.0 * index, 10.0 * (index + 1), ["w"]) for index in range(9)]
-        groups = build_pseudo_spans(spans, min_seconds=40.0, max_seconds=90.0)
+        groups = build_pseudo_spans(spans, min_seconds=40.0, max_seconds=90.0, max_gap=1.0)
         assert [len(group) for group in groups] == [4, 4]
+
+    def test_short_no_speech_gaps_are_joined(self):
+        # the real layout: a <no-speech> span between every pair of utterances
+        spans = [
+            Span(0.0, 12.0, ["a"]),
+            Span(12.5, 25.0, ["b"]),
+            Span(25.3, 38.0, ["c"]),
+            Span(38.4, 50.0, ["d"]),
+        ]
+        groups = build_pseudo_spans(spans, min_seconds=40.0, max_seconds=90.0, max_gap=1.0)
+        assert [len(group) for group in groups] == [4]
 
     def test_gap_breaks_a_group(self):
         spans = [
@@ -40,7 +51,7 @@ class TestBuildPseudoSpans:
             Span(30.0, 55.0, ["b"]),
             Span(55.0, 80.0, ["c"]),
         ]
-        groups = build_pseudo_spans(spans, min_seconds=40.0, max_seconds=90.0)
+        groups = build_pseudo_spans(spans, min_seconds=40.0, max_seconds=90.0, max_gap=1.0)
         assert len(groups) == 1
         assert groups[0][0].start == 30.0
 
@@ -50,11 +61,11 @@ class TestBuildPseudoSpans:
             Span(20.0, 60.0, ["long"]),
             Span(60.0, 80.0, ["b"]),
         ]
-        assert build_pseudo_spans(spans, min_seconds=30.0, max_seconds=90.0) == []
+        assert build_pseudo_spans(spans, min_seconds=30.0, max_seconds=90.0, max_gap=1.0) == []
 
     def test_respects_max_length(self):
         spans = [Span(0.0, 20.0, ["a"]), Span(20.0, 45.0, ["b"]), Span(45.0, 70.0, ["c"])]
-        groups = build_pseudo_spans(spans, min_seconds=60.0, max_seconds=50.0)
+        groups = build_pseudo_spans(spans, min_seconds=60.0, max_seconds=50.0, max_gap=1.0)
         assert groups == []
 
 
@@ -66,6 +77,19 @@ class TestEvaluatePseudoSpan:
         assert [row["correct"] for row in word_rows] == [True, False, True]
         assert boundary_rows[0]["predicted"] == 6.5
         assert boundary_rows[0]["error"] == 1.5
+
+    def test_prediction_inside_no_speech_gap_is_exact(self):
+        members = [Span(0.0, 5.0, ["a"]), Span(7.0, 10.0, ["b"])]
+        timings = [timed("a", 1.0, 4.0), timed("b", 8.0, 9.0)]
+        _, boundary_rows = evaluate_pseudo_span(members, timings)
+        assert boundary_rows[0]["predicted"] == 6.0
+        assert boundary_rows[0]["error"] == 0.0
+
+    def test_early_prediction_has_negative_error(self):
+        members = [Span(0.0, 5.0, ["a"]), Span(7.0, 10.0, ["b"])]
+        timings = [timed("a", 1.0, 2.0), timed("b", 4.0, 9.0)]
+        _, boundary_rows = evaluate_pseudo_span(members, timings)
+        assert boundary_rows[0]["error"] == -2.0
 
     def test_word_aligned_at_time_zero_counts_as_aligned(self):
         members = [Span(0.0, 5.0, ["a"]), Span(5.0, 10.0, ["b"])]

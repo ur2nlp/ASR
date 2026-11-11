@@ -7,7 +7,9 @@ long span's cleaned words to its audio with torchaudio's MMS_FA model and cut at
 This module currently provides the ``validate`` mode, which measures how well that works on
 data whose answer is known: runs of consecutive *short*, contiguous spans are joined into
 pseudo-long spans (40-90 s by default), aligned as one span, and the predicted boundaries
-are compared with the transcriber's real timestamps. Outputs (in ``--output-dir``):
+are compared with the transcriber's real timestamps. Transcribers put a ``<no-speech>`` span
+between most utterances, so members may be separated by such gaps (up to ``--max-gap``);
+the gap audio stays in the clip, and a predicted boundary anywhere inside it is exact. Outputs (in ``--output-dir``):
 
 - ``words.csv``: every word with its aligned time, alignment score, and whether its
   midpoint fell inside the span it truly belongs to.
@@ -104,19 +106,21 @@ def build_pseudo_spans(
     spans: list[Span],
     min_seconds: float,
     max_seconds: float,
+    max_gap: float,
 ) -> list[list[Span]]:
-    """Group consecutive, contiguous short spans into pseudo-long spans.
+    """Group consecutive short spans into pseudo-long spans.
 
-    Spans are contiguous when one ends exactly where the next starts, i.e. no dropped
-    ``<no-speech>`` or markup-only span lies between them. A group is closed as soon as it
-    reaches ``min_seconds``; a span that would push it past ``max_seconds``, a gap, or a
-    span already over the 30 s limit starts a new group. Groups shorter than
-    ``min_seconds`` or with a single member are discarded.
+    Consecutive spans may be separated by a gap of at most ``max_gap`` seconds: the dropped
+    ``<no-speech>`` (or markup-only) span between them, whose audio stays in the clip. A
+    group is closed as soon as it reaches ``min_seconds``; a span that would push it past
+    ``max_seconds``, a longer gap, or a span already over the 30 s limit starts a new group.
+    Groups shorter than ``min_seconds`` or with a single member are discarded.
 
     Args:
         spans: A recording's spans in file order.
         min_seconds: Minimum pseudo-span duration.
         max_seconds: Maximum pseudo-span duration.
+        max_gap: Longest gap allowed between consecutive members.
 
     Returns:
         A list of groups, each a list of at least two spans.
@@ -135,9 +139,9 @@ def build_pseudo_spans(
             close_current()
             continue
         if current:
-            contiguous = abs(span.start - current[-1].end) < 1e-6
+            gap = span.start - current[-1].end
             too_long = span.end - current[0].start > max_seconds
-            if not contiguous or too_long:
+            if gap < -1e-6 or gap > max_gap or too_long:
                 close_current()
         current.append(span)
         if current[-1].end - current[0].start >= min_seconds:
@@ -211,9 +215,12 @@ def evaluate_pseudo_span(
 
     Returns:
         ``(word_rows, boundary_rows)``. A word is correct when its aligned midpoint lies in
-        its own member's ``[start, end]``. A boundary's prediction is the midpoint between
-        the last aligned word before it and the first aligned word after it; it is None
-        when either side has no aligned word.
+        its own member's ``[start, end]``. A true boundary is the interval between one
+        member's end and the next one's start (often a ``<no-speech>`` gap, possibly
+        empty). The prediction is the midpoint between the last aligned word before it
+        and the first aligned word after it, and its error is the signed distance to that
+        interval: 0 inside it, negative before it, positive after it. Prediction and error
+        are None when either side has no aligned word.
     """
     word_rows = []
     member_timings = []
@@ -244,19 +251,28 @@ def evaluate_pseudo_span(
     for member_index in range(1, len(members)):
         before = [timing for timing in member_timings[member_index - 1] if timing.end is not None]
         after = [timing for timing in member_timings[member_index] if timing.start is not None]
-        true_boundary = members[member_index].start
+        true_start = members[member_index - 1].end
+        true_end = members[member_index].start
         predicted = None
-        gap = None
+        error = None
+        aligned_gap = None
         if before and after:
-            gap = after[0].start - before[-1].end
+            aligned_gap = after[0].start - before[-1].end
             predicted = (before[-1].end + after[0].start) / 2
+            if predicted < true_start:
+                error = predicted - true_start
+            elif predicted > true_end:
+                error = predicted - true_end
+            else:
+                error = 0.0
         boundary_rows.append(
             {
                 "member": member_index,
-                "true_boundary": true_boundary,
+                "true_start": true_start,
+                "true_end": true_end,
                 "predicted": predicted,
-                "error": None if predicted is None else predicted - true_boundary,
-                "gap": gap,
+                "error": error,
+                "aligned_gap": aligned_gap,
             }
         )
     return word_rows, boundary_rows
@@ -420,7 +436,12 @@ def run_validate(args: argparse.Namespace) -> None:
     pseudo_rows: list[dict] = []
     for transcriber, recording in recordings:
         spans = load_spans(os.path.join(args.raw_dir, f"{recording}.txt"))
-        groups = build_pseudo_spans(spans, args.min_seconds, args.max_seconds)
+        groups = build_pseudo_spans(
+            spans,
+            args.min_seconds,
+            args.max_seconds,
+            args.max_gap,
+        )
         if not groups:
             continue
         # waveform: (num_samples,) at 16 kHz mono
@@ -493,6 +514,12 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--recordings-per-transcriber", type=int, default=10)
     validate.add_argument("--min-seconds", type=float, default=40.0)
     validate.add_argument("--max-seconds", type=float, default=90.0)
+    validate.add_argument(
+        "--max-gap",
+        type=float,
+        default=5.0,
+        help="longest <no-speech> gap allowed between joined spans, in seconds",
+    )
     validate.add_argument(
         "--no-star",
         action="store_true",
