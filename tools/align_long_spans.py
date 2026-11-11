@@ -4,8 +4,30 @@ Transcribers timestamp at their own pace, and every span over 30 s is lost to Wh
 window (27% of the corpus hours; see .claude/long_segments.md). The plan is to align each
 long span's cleaned words to its audio with torchaudio's MMS_FA model and cut at pauses.
 
-This module currently provides the ``validate`` mode, which measures how well that works on
-data whose answer is known: runs of consecutive *short*, contiguous spans are joined into
+Two modes:
+
+``align`` aligns every span over 30 s and plans where to cut it, writing a manifest that
+``prepare_zulu.py`` can consume. Cuts go only in the middle of an aligned pause of at least
+``--min-pause`` (0.3 s): in validation, words either side of such a pause were on the right
+side of the true boundary 92-98% of the time, against 31-61% for shorter pauses. The first
+piece starts at the span's own start timestamp and the last ends at its end timestamp.
+A span is cut at its longest qualifying pause (preferring cuts that leave both sides at
+least ``--min-piece-seconds``), recursively, until every piece fits in ``--max-seconds``.
+A piece that still does not fit, because it has no qualifying pause, is marked
+``too_long`` rather than force-cut. A span whose mean alignment score is below
+``--min-span-score`` (0.35; in validation every badly misaligned pseudo-span scored below
+~0.34) is marked ``low_score`` throughout. Outputs (in ``--output-dir``):
+
+- ``manifest.csv``: one row per planned piece -- recording, ``span_index`` (the index
+  ``prepare_zulu`` uses in ``{stem}_{index:03d}``), piece number, start/end in the
+  recording, word counts, piece and span mean score, the aligned pause at the cut before
+  it, ``status`` (``ok``, ``too_long``, ``low_score``, ``align_error``) and the text.
+- ``summary.json``: long-span hours and recovered (``ok``) hours, overall and per
+  transcriber, and hours by status.
+- ``sample/`` (with ``--sample-per-transcriber``): random ``ok`` pieces as ``.wav`` +
+  ``.txt`` for a listening check.
+
+``validate`` measures how well alignment works on data whose answer is known: runs of consecutive *short*, contiguous spans are joined into
 pseudo-long spans (40-90 s by default), aligned as one span, and the predicted boundaries
 are compared with the transcriber's real timestamps. Transcribers put a ``<no-speech>`` span
 between most utterances, so members may be separated by such gaps (up to ``--max-gap``);
@@ -27,6 +49,8 @@ reduced form; labels always keep the transcriber's words.
 GPU work: run on a compute node, never on circ's login node (see .claude/CLAUDE.md).
 
 Usage:
+    python -m tools.align_long_spans align --output-dir outputs/long_span_alignment \
+        --sample-per-transcriber 5
     python -m tools.align_long_spans validate --raw-dir data/zulu/raw \\
         --metadata data/zulu/metadata.csv --output-dir outputs/alignment_validation
 """
@@ -56,6 +80,8 @@ class Span:
     start: float
     end: float
     words: list[str]
+    # position in parse_segments' output, i.e. prepare_zulu's `{stem}_{index:03d}`
+    index: int = -1
 
 
 @dataclass
@@ -95,10 +121,10 @@ def normalize_for_alignment(word: str) -> str:
 def load_spans(transcript_path: str) -> list[Span]:
     """Parse a transcript into spans with cleaned, non-empty word lists."""
     spans = []
-    for start, end, raw_text in parse_segments(transcript_path):
+    for index, (start, end, raw_text) in enumerate(parse_segments(transcript_path)):
         words = clean_text(raw_text).split()
         if words:
-            spans.append(Span(start=start, end=end, words=words))
+            spans.append(Span(start=start, end=end, words=words, index=index))
     return spans
 
 
@@ -150,52 +176,96 @@ def build_pseudo_spans(
     return groups
 
 
+@dataclass
+class Piece:
+    """A planned cut of one span: a word range and the audio interval it maps to."""
+
+    first_word: int
+    end_word: int
+    start: float
+    end: float
+    # aligned pause at the cut that starts this piece; None for the span's first piece
+    pause_before: float | None
+
+
 def split_at_pauses(
     timings: list[WordTiming],
+    span_start: float,
+    span_end: float,
     max_seconds: float,
     min_seconds: float,
-) -> list[tuple[int, int]]:
-    """Recursively cut a word sequence at its longest pause until pieces fit.
+    min_pause: float,
+) -> list[Piece]:
+    """Recursively cut a span at its longest qualifying pause until every piece fits.
 
-    A piece's duration runs from its first to its last aligned word. Cuts are only made
-    between two aligned words, and preferably where both sides last at least
-    ``min_seconds``; unaligned words stay with the preceding aligned word.
+    Only pauses of at least ``min_pause`` between two consecutive aligned words qualify,
+    and the cut is placed at the pause's midpoint. Pieces' audio runs from cut to cut, with
+    the span's own ``span_start``/``span_end`` at the outer edges, and it is that audio
+    duration which must fit in ``max_seconds``. Among qualifying pauses, ones leaving both
+    sides at least ``min_seconds`` are preferred, then the longest. Unaligned words stay
+    with the preceding aligned word (or the first piece, if none precedes them).
 
     Args:
-        timings: Aligned words of one span, in order.
+        timings: Aligned words of one span, in order, with absolute times.
+        span_start: The span's start timestamp.
+        span_end: The span's end timestamp.
         max_seconds: Longest allowed piece.
         min_seconds: Shortest preferred piece.
+        min_pause: Shortest pause a cut may be placed in.
 
     Returns:
-        ``(first, last_exclusive)`` word-index ranges covering every word, in order. A piece
-        may still exceed ``max_seconds`` if it has no pause to cut at.
+        Pieces covering every word, in order. A piece may still exceed ``max_seconds`` if
+        it has no qualifying pause; the caller decides what to do with it.
     """
     aligned = [index for index, timing in enumerate(timings) if timing.start is not None]
+    if not aligned:
+        return [Piece(0, len(timings), span_start, span_end, None)]
 
-    def piece_duration(first_aligned: int, last_aligned: int) -> float:
-        return timings[aligned[last_aligned]].end - timings[aligned[first_aligned]].start
+    def pause_at(position: int) -> float:
+        """Pause before aligned word `position` (between it and the previous one)."""
+        return timings[aligned[position]].start - timings[aligned[position - 1]].end
 
-    def cut(first_aligned: int, last_aligned: int) -> list[int]:
-        """Return positions in `aligned` where a new piece starts."""
-        if last_aligned <= first_aligned:
-            return []
-        if piece_duration(first_aligned, last_aligned) <= max_seconds:
+    def cut_time(position: int) -> float:
+        return (timings[aligned[position - 1]].end + timings[aligned[position]].start) / 2
+
+    def cut(first: int, last: int, left_time: float, right_time: float) -> list[int]:
+        """Return the positions in `aligned` where new pieces start, within first..last."""
+        if right_time - left_time <= max_seconds:
             return []
         candidates = []
-        for position in range(first_aligned + 1, last_aligned + 1):
-            gap = timings[aligned[position]].start - timings[aligned[position - 1]].end
-            left = piece_duration(first_aligned, position - 1)
-            right = piece_duration(position, last_aligned)
-            balanced = left >= min_seconds and right >= min_seconds
-            candidates.append((balanced, gap, position))
+        for position in range(first + 1, last + 1):
+            pause = pause_at(position)
+            if pause < min_pause:
+                continue
+            time = cut_time(position)
+            balanced = time - left_time >= min_seconds and right_time - time >= min_seconds
+            candidates.append((balanced, pause, position))
+        if not candidates:
+            return []
         _, _, best = max(candidates)
-        return cut(first_aligned, best - 1) + [best] + cut(best, last_aligned)
+        best_time = cut_time(best)
+        left_cuts = cut(first, best - 1, left_time, best_time)
+        right_cuts = cut(best, last, best_time, right_time)
+        return left_cuts + [best] + right_cuts
 
-    if not aligned:
-        return [(0, len(timings))]
-    piece_starts = [0] + [aligned[position] for position in cut(0, len(aligned) - 1)]
-    piece_ends = piece_starts[1:] + [len(timings)]
-    return list(zip(piece_starts, piece_ends))
+    positions = cut(0, len(aligned) - 1, span_start, span_end)
+    starts = [0] + [aligned[position] for position in positions]
+    ends = starts[1:] + [len(timings)]
+    times = [span_start] + [cut_time(position) for position in positions] + [span_end]
+    pauses = [None] + [pause_at(position) for position in positions]
+
+    pieces = []
+    for piece_index in range(len(starts)):
+        pieces.append(
+            Piece(
+                first_word=starts[piece_index],
+                end_word=ends[piece_index],
+                start=times[piece_index],
+                end=times[piece_index + 1],
+                pause_before=pauses[piece_index],
+            )
+        )
+    return pieces
 
 
 # ---------------------------------------------------------------------------
@@ -353,10 +423,12 @@ class MmsAligner:
 def choose_recordings(
     raw_dir: str,
     metadata_path: str,
-    per_transcriber: int,
+    per_transcriber: int | None,
     seed: int,
 ) -> list[tuple[str, str]]:
     """Sample recordings with transcripts, up to `per_transcriber` per transcriber.
+
+    With `per_transcriber` None, every recording is returned.
 
     Reads only ``{recording}.txt`` names from `raw_dir` and the anonymized metadata.
 
@@ -379,7 +451,9 @@ def choose_recordings(
     for transcriber in sorted(by_transcriber):
         recordings = sorted(by_transcriber[transcriber])
         generator.shuffle(recordings)
-        for recording in recordings[:per_transcriber]:
+        if per_transcriber is not None:
+            recordings = recordings[:per_transcriber]
+        for recording in recordings:
             chosen.append((transcriber, recording))
     return sorted(chosen)
 
@@ -503,6 +577,211 @@ def run_validate(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# Align mode
+# ---------------------------------------------------------------------------
+
+
+def mean_score(timings: list[WordTiming]) -> float | None:
+    scores = [timing.score for timing in timings if timing.score is not None]
+    return statistics.fmean(scores) if scores else None
+
+
+def plan_span(
+    span: Span,
+    timings: list[WordTiming],
+    max_seconds: float,
+    min_piece_seconds: float,
+    min_pause: float,
+    min_span_score: float,
+) -> list[dict]:
+    """Cut one aligned long span into pieces and give each piece a status.
+
+    Returns:
+        One row per piece (see the module docstring for the columns).
+    """
+    span_score = mean_score(timings)
+    pieces = split_at_pauses(
+        timings,
+        span.start,
+        span.end,
+        max_seconds,
+        min_piece_seconds,
+        min_pause,
+    )
+    rows = []
+    for piece_index, piece in enumerate(pieces):
+        piece_timings = timings[piece.first_word : piece.end_word]
+        if span_score is None or span_score < min_span_score:
+            status = "low_score"
+        elif piece.end - piece.start > max_seconds:
+            status = "too_long"
+        else:
+            status = "ok"
+        piece_score = mean_score(piece_timings)
+        rows.append(
+            {
+                "span_index": span.index,
+                "piece": piece_index,
+                "start": round(piece.start, 3),
+                "end": round(piece.end, 3),
+                "duration": round(piece.end - piece.start, 3),
+                "words": len(piece_timings),
+                "words_aligned": sum(timing.start is not None for timing in piece_timings),
+                "piece_score": None if piece_score is None else round(piece_score, 4),
+                "span_score": None if span_score is None else round(span_score, 4),
+                "pause_before": None
+                if piece.pause_before is None
+                else round(piece.pause_before, 3),
+                "status": status,
+                "text": " ".join(span.words[piece.first_word : piece.end_word]),
+            }
+        )
+    return rows
+
+
+def summarize_manifest(rows: list[dict]) -> dict:
+    """Hours by status, overall and per transcriber."""
+
+    def hours(selected: list[dict]) -> float:
+        return round(sum(row["duration"] for row in selected) / 3600.0, 3)
+
+    def block(selected: list[dict]) -> dict:
+        statuses = sorted({row["status"] for row in selected})
+        spans = {(row["recording"], row["span_index"]) for row in selected}
+        return {
+            "long_spans": len(spans),
+            "long_hours": hours(selected),
+            "ok_hours": hours([row for row in selected if row["status"] == "ok"]),
+            "ok_pieces": sum(row["status"] == "ok" for row in selected),
+            "hours_by_status": {
+                status: hours([row for row in selected if row["status"] == status])
+                for status in statuses
+            },
+        }
+
+    summary = {"all": block(rows)}
+    for transcriber in sorted({row["transcriber"] for row in rows}):
+        summary[transcriber] = block([row for row in rows if row["transcriber"] == transcriber])
+    return summary
+
+
+def write_sample(
+    rows: list[dict],
+    raw_dir: str,
+    sample_dir: str,
+    per_transcriber: int,
+    seed: int,
+) -> None:
+    """Write random `ok` pieces as .wav/.txt pairs for a listening check."""
+    import librosa
+    import soundfile
+
+    generator = random.Random(seed)
+    os.makedirs(sample_dir, exist_ok=True)
+    for transcriber in sorted({row["transcriber"] for row in rows}):
+        candidates = [
+            row for row in rows if row["transcriber"] == transcriber and row["status"] == "ok"
+        ]
+        for row in generator.sample(candidates, min(per_transcriber, len(candidates))):
+            # clip: (num_samples,) at 16 kHz mono
+            clip, _ = librosa.load(
+                os.path.join(raw_dir, f"{row['recording']}.wav"),
+                sr=TARGET_SAMPLING_RATE,
+                mono=True,
+                offset=row["start"],
+                duration=row["duration"],
+            )
+            name = f"{transcriber}_{row['recording']}_{row['span_index']:03d}_{row['piece']:02d}"
+            soundfile.write(os.path.join(sample_dir, f"{name}.wav"), clip, TARGET_SAMPLING_RATE)
+            with open(os.path.join(sample_dir, f"{name}.txt"), "w", encoding="utf-8") as text_file:
+                text_file.write(row["text"] + "\n")
+
+
+def run_align(args: argparse.Namespace) -> None:
+    import librosa
+    import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        print("warning: no GPU; alignment will be slow", file=sys.stderr)
+    aligner = MmsAligner(device=device, star_edges=not args.no_star)
+
+    recordings = choose_recordings(args.raw_dir, args.metadata, None, args.seed)
+    rows: list[dict] = []
+    for transcriber, recording in recordings:
+        long_spans = [
+            span
+            for span in load_spans(os.path.join(args.raw_dir, f"{recording}.txt"))
+            if span.end - span.start > LONG_SPAN_SECONDS
+        ]
+        if not long_spans:
+            continue
+        # waveform: (num_samples,) at 16 kHz mono
+        waveform, _ = librosa.load(
+            os.path.join(args.raw_dir, f"{recording}.wav"),
+            sr=TARGET_SAMPLING_RATE,
+            mono=True,
+        )
+        for span in long_spans:
+            clip = waveform[
+                int(span.start * TARGET_SAMPLING_RATE) : int(span.end * TARGET_SAMPLING_RATE)
+            ]
+            identity = {"transcriber": transcriber, "recording": recording}
+            try:
+                timings = aligner.align(clip, span.words, offset=span.start)
+            except RuntimeError as error:
+                # e.g. CUDA OOM, or more tokens than frames
+                print(f"warning: {recording} span {span.index}: {error}", file=sys.stderr)
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+                rows.append(
+                    {
+                        **identity,
+                        "span_index": span.index,
+                        "piece": 0,
+                        "start": span.start,
+                        "end": span.end,
+                        "duration": round(span.end - span.start, 3),
+                        "words": len(span.words),
+                        "words_aligned": 0,
+                        "piece_score": None,
+                        "span_score": None,
+                        "pause_before": None,
+                        "status": "align_error",
+                        "text": " ".join(span.words),
+                    }
+                )
+                continue
+            planned = plan_span(
+                span,
+                timings,
+                args.max_seconds,
+                args.min_piece_seconds,
+                args.min_pause,
+                args.min_span_score,
+            )
+            rows.extend({**identity, **row} for row in planned)
+        print(f"{transcriber} {recording}: {len(long_spans)} long span(s)", file=sys.stderr)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    write_csv(os.path.join(args.output_dir, "manifest.csv"), rows)
+    summary = summarize_manifest(rows)
+    summary["settings"] = {key: value for key, value in vars(args).items() if key != "func"}
+    with open(os.path.join(args.output_dir, "summary.json"), "w") as summary_file:
+        json.dump(summary, summary_file, indent=2)
+    print(json.dumps(summary, indent=2))
+
+    if args.sample_per_transcriber > 0:
+        write_sample(
+            rows,
+            args.raw_dir,
+            os.path.join(args.output_dir, "sample"),
+            args.sample_per_transcriber,
+            args.seed,
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -527,6 +806,39 @@ def parse_args() -> argparse.Namespace:
     )
     validate.add_argument("--seed", type=int, default=1)
     validate.set_defaults(func=run_validate)
+
+    align = subparsers.add_parser("align", help="align long spans and plan their cuts")
+    align.add_argument("--raw-dir", default="data/zulu/raw")
+    align.add_argument("--metadata", default="data/zulu/metadata.csv")
+    align.add_argument("--output-dir", default="outputs/long_span_alignment")
+    align.add_argument("--max-seconds", type=float, default=30.0, help="longest piece")
+    align.add_argument(
+        "--min-piece-seconds",
+        type=float,
+        default=5.0,
+        help="prefer cuts leaving both sides at least this long",
+    )
+    align.add_argument(
+        "--min-pause",
+        type=float,
+        default=0.3,
+        help="shortest aligned pause a cut may be placed in, in seconds",
+    )
+    align.add_argument(
+        "--min-span-score",
+        type=float,
+        default=0.35,
+        help="spans whose mean alignment score is below this are marked low_score",
+    )
+    align.add_argument(
+        "--sample-per-transcriber",
+        type=int,
+        default=0,
+        help="write this many random ok pieces per transcriber to sample/ for listening",
+    )
+    align.add_argument("--no-star", action="store_true")
+    align.add_argument("--seed", type=int, default=1)
+    align.set_defaults(func=run_align)
     return parser.parse_args()
 
 

@@ -6,6 +6,7 @@ from tools.align_long_spans import (
     build_pseudo_spans,
     evaluate_pseudo_span,
     normalize_for_alignment,
+    plan_span,
     split_at_pauses,
 )
 
@@ -106,25 +107,58 @@ class TestEvaluatePseudoSpan:
 
 
 class TestSplitAtPauses:
-    def test_short_sequence_is_one_piece(self):
-        timings = [timed("a", 0.0, 1.0), timed("b", 2.0, 3.0)]
-        assert split_at_pauses(timings, max_seconds=30.0, min_seconds=2.0) == [(0, 2)]
+    def split(self, timings, span_start, span_end, max_seconds=30.0, min_pause=0.3):
+        return split_at_pauses(
+            timings,
+            span_start,
+            span_end,
+            max_seconds=max_seconds,
+            min_seconds=2.0,
+            min_pause=min_pause,
+        )
 
-    def test_cuts_at_longest_pause(self):
+    def test_short_span_is_one_piece(self):
+        timings = [timed("a", 0.5, 1.0), timed("b", 2.0, 3.0)]
+        pieces = self.split(timings, 0.0, 4.0)
+        assert [(piece.first_word, piece.end_word) for piece in pieces] == [(0, 2)]
+        assert (pieces[0].start, pieces[0].end) == (0.0, 4.0)
+        assert pieces[0].pause_before is None
+
+    def test_cuts_at_midpoint_of_longest_pause(self):
         timings = [
             timed("a", 0.0, 10.0),
             timed("b", 10.5, 20.0),
             timed("c", 25.0, 35.0),
-            timed("d", 35.2, 40.0),
+            timed("d", 35.4, 40.0),
         ]
-        assert split_at_pauses(timings, max_seconds=30.0, min_seconds=2.0) == [(0, 2), (2, 4)]
+        pieces = self.split(timings, 0.0, 41.0)
+        assert [(piece.first_word, piece.end_word) for piece in pieces] == [(0, 2), (2, 4)]
+        assert pieces[0].end == pieces[1].start == 22.5
+        assert (pieces[0].start, pieces[1].end) == (0.0, 41.0)
+        assert pieces[1].pause_before == 5.0
+
+    def test_pauses_below_threshold_are_never_cut(self):
+        timings = [timed(str(index), 2.0 * index, 2.0 * index + 1.9) for index in range(30)]
+        pieces = self.split(timings, 0.0, 60.0, min_pause=0.3)
+        assert len(pieces) == 1
+        assert pieces[0].end - pieces[0].start > 30.0
 
     def test_every_piece_fits_when_pauses_allow(self):
         timings = [timed(str(index), 3.0 * index, 3.0 * index + 2.5) for index in range(40)]
-        pieces = split_at_pauses(timings, max_seconds=20.0, min_seconds=2.0)
-        assert pieces[0][0] == 0 and pieces[-1][1] == 40
-        for first, last in pieces:
-            assert timings[last - 1].end - timings[first].start <= 20.0
+        pieces = self.split(timings, 0.0, 120.0, max_seconds=20.0)
+        assert pieces[0].first_word == 0 and pieces[-1].end_word == 40
+        for previous, following in zip(pieces, pieces[1:]):
+            assert previous.end_word == following.first_word
+            assert previous.end == following.start
+        for piece in pieces:
+            assert piece.end - piece.start <= 20.0
+
+    def test_piece_duration_includes_span_edges(self):
+        # word extents fit in 30 s, but the span's leading silence pushes the audio over
+        timings = [timed("a", 10.0, 20.0), timed("b", 21.0, 35.0)]
+        pieces = self.split(timings, 0.0, 35.0)
+        assert len(pieces) == 2
+        assert pieces[0].end == 20.5
 
     def test_unaligned_word_stays_with_predecessor(self):
         timings = [
@@ -132,4 +166,50 @@ class TestSplitAtPauses:
             WordTiming("1", None, None, None),
             timed("b", 25.0, 35.0),
         ]
-        assert split_at_pauses(timings, max_seconds=30.0, min_seconds=2.0) == [(0, 2), (2, 3)]
+        pieces = self.split(timings, 0.0, 35.0)
+        assert [(piece.first_word, piece.end_word) for piece in pieces] == [(0, 2), (2, 3)]
+
+    def test_nothing_aligned_is_one_piece(self):
+        timings = [WordTiming("1", None, None, None)]
+        pieces = self.split(timings, 0.0, 50.0)
+        assert [(piece.first_word, piece.end_word) for piece in pieces] == [(0, 1)]
+
+
+class TestPlanSpan:
+    def plan(self, span, timings, min_span_score=0.35):
+        return plan_span(
+            span,
+            timings,
+            max_seconds=30.0,
+            min_piece_seconds=2.0,
+            min_pause=0.3,
+            min_span_score=min_span_score,
+        )
+
+    def test_ok_pieces_keep_the_transcribers_words(self):
+        span = Span(0.0, 41.0, ["Sawubona,", "baba", "Unjani?", "Ngiyaphila."], index=7)
+        timings = [
+            timed(word, start, end)
+            for word, (start, end) in zip(
+                span.words, [(0.0, 10.0), (10.5, 20.0), (25.0, 35.0), (35.4, 40.0)]
+            )
+        ]
+        rows = self.plan(span, timings)
+        assert [row["status"] for row in rows] == ["ok", "ok"]
+        assert [row["text"] for row in rows] == ["Sawubona, baba", "Unjani? Ngiyaphila."]
+        assert {row["span_index"] for row in rows} == {7}
+
+    def test_low_span_score_marks_every_piece(self):
+        span = Span(0.0, 41.0, ["a", "b"])
+        timings = [
+            WordTiming("a", 0.0, 10.0, 0.1),
+            WordTiming("b", 25.0, 35.0, 0.2),
+        ]
+        rows = self.plan(span, timings)
+        assert {row["status"] for row in rows} == {"low_score"}
+
+    def test_uncuttable_piece_is_too_long(self):
+        span = Span(0.0, 60.0, [str(index) for index in range(30)])
+        timings = [timed(str(index), 2.0 * index, 2.0 * index + 1.9) for index in range(30)]
+        rows = self.plan(span, timings)
+        assert [row["status"] for row in rows] == ["too_long"]
