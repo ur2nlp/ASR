@@ -35,11 +35,17 @@ checked against the transcript, and a mismatch (a stale manifest) is an error. W
 result to a new directory (``data/zulu/prepared_v2``, used by ``dataset=zulu_v2``), not over
 ``prepared/``: every cache and split built on the old corpus would otherwise go stale.
 
+``--list-only examples.csv`` writes nothing but an ``example,duration`` list of the pairs
+that would be written (durations from the timestamps; no audio is decoded, so it is cheap
+enough for a login node). Feed it to ``tools/split_dry_run.py`` to preview a split.
+
 Usage:
     python tools/prepare_zulu.py
     python tools/prepare_zulu.py --input-dir data/zulu/raw \
         --output-dir data/zulu/prepared
     python tools/prepare_zulu.py --output-dir data/zulu/prepared_v2 \
+        --long-span-manifest outputs/long_span_alignment/manifest.csv
+    python tools/prepare_zulu.py --list-only outputs/zulu_v2_examples.csv \
         --long-span-manifest outputs/long_span_alignment/manifest.csv
 """
 
@@ -48,9 +54,6 @@ import csv
 import os
 import re
 import sys
-
-import librosa
-import soundfile as sf
 
 TARGET_SAMPLING_RATE = 16000
 
@@ -181,15 +184,79 @@ def write_pair(
     segment_stem: str,
 ) -> bool:
     """Write one clip and its transcript; return False if the clip is empty."""
+    import soundfile
+
     start_sample = int(start * TARGET_SAMPLING_RATE)
     end_sample = int(end * TARGET_SAMPLING_RATE)
     clip = waveform[start_sample:end_sample]
     if clip.size == 0:
         return False
-    sf.write(os.path.join(output_dir, f"{segment_stem}.wav"), clip, TARGET_SAMPLING_RATE)
+    soundfile.write(os.path.join(output_dir, f"{segment_stem}.wav"), clip, TARGET_SAMPLING_RATE)
     with open(os.path.join(output_dir, f"{segment_stem}.txt"), "w", encoding="utf-8") as text_file:
         text_file.write(text + "\n")
     return True
+
+
+def plan_recording(
+    stem: str,
+    transcript_path: str,
+    min_seconds: float,
+    long_span_pieces: dict[int, list[dict]] | None = None,
+) -> list[tuple[str, float, float, str]]:
+    """Decide which utterance pairs one recording yields, without touching its audio.
+
+    Args:
+        stem: The recording's file stem.
+        transcript_path: Path to the matching timestamped transcript.
+        min_seconds: Drop segments (and long-span pieces) shorter than this many seconds.
+        long_span_pieces: This recording's spans from a long-span manifest, keyed by span
+            index. Each listed span yields its ``ok`` pieces,
+            ``{stem}_{index:03d}_{piece:02d}``, instead of itself. The whole manifest for
+            the recording is checked against the transcript first.
+
+    Returns:
+        ``(segment_stem, start, end, text)`` per pair, in transcript order.
+    """
+    segments = parse_segments(transcript_path)
+    if not segments:
+        print(f"Warning: no speech segments in {transcript_path}", file=sys.stderr)
+        return []
+
+    long_span_pieces = long_span_pieces or {}
+    unknown = set(long_span_pieces) - set(range(len(segments)))
+    if unknown:
+        raise ValueError(f"{stem}: manifest lists span(s) {sorted(unknown)} not in the transcript")
+    for index, pieces in long_span_pieces.items():
+        start, end, raw_text = segments[index]
+        check_pieces(pieces, start, end, clean_text(raw_text), where=f"{stem} span {index}")
+
+    planned = []
+    for index, (start, end, raw_text) in enumerate(segments):
+        text = clean_text(raw_text)
+        if not text:
+            continue
+
+        pieces = long_span_pieces.get(index)
+        if pieces is not None:
+            for piece in pieces:
+                if piece["status"] != "ok":
+                    continue
+                if piece["end"] - piece["start"] < min_seconds:
+                    continue
+                planned.append(
+                    (
+                        f"{stem}_{index:03d}_{piece['piece']:02d}",
+                        piece["start"],
+                        piece["end"],
+                        piece["text"],
+                    )
+                )
+            continue
+
+        if end - start < min_seconds:
+            continue
+        planned.append((f"{stem}_{index:03d}", start, end, text))
+    return planned
 
 
 def prepare_recording(
@@ -206,61 +273,24 @@ def prepare_recording(
         transcript_path: Path to the matching timestamped transcript.
         output_dir: Directory to write ``{stem}_{index}.wav``/``.txt`` pairs to.
         min_seconds: Drop segments (and long-span pieces) shorter than this many seconds.
-        long_span_pieces: This recording's spans from a long-span manifest, keyed by span
-            index. Each listed span is written as its ``ok`` pieces,
-            ``{stem}_{index:03d}_{piece:02d}``, instead of whole.
+        long_span_pieces: See `plan_recording`.
 
     Returns:
         The number of utterance pairs written for this recording.
     """
-    stem = os.path.splitext(os.path.basename(audio_path))[0]
-    segments = parse_segments(transcript_path)
-    if not segments:
-        print(f"Warning: no speech segments in {transcript_path}", file=sys.stderr)
-        return 0
+    import librosa
 
-    # check the whole manifest for this recording before writing any of its files
-    long_span_pieces = long_span_pieces or {}
-    unknown = set(long_span_pieces) - set(range(len(segments)))
-    if unknown:
-        raise ValueError(f"{stem}: manifest lists span(s) {sorted(unknown)} not in the transcript")
-    for index, pieces in long_span_pieces.items():
-        start, end, raw_text = segments[index]
-        check_pieces(pieces, start, end, clean_text(raw_text), where=f"{stem} span {index}")
+    stem = os.path.splitext(os.path.basename(audio_path))[0]
+    planned = plan_recording(stem, transcript_path, min_seconds, long_span_pieces)
+    if not planned:
+        return 0
 
     # waveform: (num_samples,) at 16 kHz mono
     waveform, _ = librosa.load(audio_path, sr=TARGET_SAMPLING_RATE, mono=True)
-
     written = 0
-    for index, (start, end, raw_text) in enumerate(segments):
-        text = clean_text(raw_text)
-        if not text:
-            continue
-
-        pieces = long_span_pieces.get(index)
-        if pieces is not None:
-            for piece in pieces:
-                if piece["status"] != "ok":
-                    continue
-                if piece["end"] - piece["start"] < min_seconds:
-                    continue
-                piece_stem = f"{stem}_{index:03d}_{piece['piece']:02d}"
-                if write_pair(
-                    waveform,
-                    piece["start"],
-                    piece["end"],
-                    piece["text"],
-                    output_dir,
-                    piece_stem,
-                ):
-                    written += 1
-            continue
-
-        if end - start < min_seconds:
-            continue
-        if write_pair(waveform, start, end, text, output_dir, f"{stem}_{index:03d}"):
+    for segment_stem, start, end, text in planned:
+        if write_pair(waveform, start, end, text, output_dir, segment_stem):
             written += 1
-
     return written
 
 
@@ -290,12 +320,20 @@ def parse_args() -> argparse.Namespace:
         help="manifest.csv from tools/align_long_spans.py align: write the spans it "
         "covers as their ok pieces instead of whole",
     )
+    parser.add_argument(
+        "--list-only",
+        default=None,
+        metavar="CSV",
+        help="write only an example,duration list of the pairs that would be written; "
+        "decodes no audio and ignores --output-dir",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
+    if args.list_only is None:
+        os.makedirs(args.output_dir, exist_ok=True)
 
     audio_files = sorted(name for name in os.listdir(args.input_dir) if name.endswith(".wav"))
     if not audio_files:
@@ -311,6 +349,7 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    listed: list[tuple[str, float]] = []
     total_pairs = 0
     total_recordings = 0
     for audio_name in audio_files:
@@ -319,6 +358,11 @@ def main() -> None:
         transcript_path = os.path.join(args.input_dir, f"{stem}.txt")
         if not os.path.isfile(transcript_path):
             print(f"Warning: no transcript for {audio_name}, skipping", file=sys.stderr)
+            continue
+        if args.list_only is not None:
+            planned = plan_recording(stem, transcript_path, args.min_seconds, manifest.get(stem))
+            listed.extend((f"{name}.wav", end - start) for name, start, end, _ in planned)
+            total_recordings += 1
             continue
         written = prepare_recording(
             audio_path,
@@ -330,6 +374,20 @@ def main() -> None:
         total_pairs += written
         total_recordings += 1
         print(f"{audio_name}: {written} segment(s)", file=sys.stderr)
+
+    if args.list_only is not None:
+        with open(args.list_only, "w", newline="", encoding="utf-8") as list_file:
+            writer = csv.writer(list_file)
+            writer.writerow(["example", "duration"])
+            for name, duration in listed:
+                writer.writerow([name, round(duration, 3)])
+        hours = sum(duration for _, duration in listed) / 3600.0
+        print(
+            f"Listed {len(listed)} utterance pair(s) ({hours:.1f} h) from {total_recordings} "
+            f"recording(s) to {args.list_only}",
+            file=sys.stderr,
+        )
+        return
 
     print(
         f"Wrote {total_pairs} utterance pair(s) from {total_recordings} "

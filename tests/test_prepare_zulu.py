@@ -155,3 +155,22 @@ def test_manifest_round_trip(tmp_path):
     manifest = load_long_span_manifest(str(path))
     assert [piece["piece"] for piece in manifest[STEM][1]] == [0, 1]
     assert manifest[STEM][1][0]["start"] == 5.5
+
+
+def test_plan_matches_what_is_written(recording):
+    """--list-only lists exactly the pairs a real run writes, with timestamp durations."""
+    from tools.prepare_zulu import plan_recording
+
+    audio_path, transcript_path, output_dir = recording
+    manifest = {
+        1: pieces(
+            (5.5, 20.0, "ok", "Ngiyaphila ngiyabonga"),
+            (20.0, 45.0, "low_score", "kakhulu wena"),
+        )
+    }
+    planned = plan_recording(STEM, transcript_path, 0.4, manifest)
+    prepare_recording(audio_path, transcript_path, str(output_dir), 0.4, manifest)
+    files = written(output_dir)
+    assert [name for name, *_ in planned] == list(files)
+    for name, start, end, text in planned:
+        assert files[name] == (round(end - start, 2), text)
