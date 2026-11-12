@@ -75,8 +75,13 @@ class SplitSpec:
             that no group straddles train and dev. Defaults to `key_column`.
         unmatched: `error` or `drop` -- what to do with an example whose key has
             no metadata row.
-        test_size: Fraction (< 1) or number of the `test`-selected examples to
-            hold out, as whole `test_group_by` groups; None holds out all of them.
+        test_size: How much of the `test`-selected data to hold out, as whole
+            `test_group_by` groups: with `test_size_unit: examples`, a fraction
+            (< 1) or number of examples; with `hours`, a number of hours of
+            usable audio (examples within the audio-length filter). None holds
+            out all of it. Groups are taken whole until the target is reached,
+            so the result overshoots by at most one group.
+        test_size_unit: `examples` or `hours` -- how `test_size` is measured.
         test_group_by: Column kept whole when sampling test. Defaults to
             `dev_group_by`, then `key_column`.
         test_remainder: `exclude` or `train` -- where the `test`-selected
@@ -105,6 +110,7 @@ class SplitSpec:
     dev_group_by: str | None = None
     unmatched: str = "error"
     test_size: float | None = None
+    test_size_unit: str = "examples"
     test_group_by: str | None = None
     test_remainder: str = "exclude"
     train_budget: float | str | None = None
@@ -136,6 +142,13 @@ class SplitSpec:
             raise ValueError(f"split.unmatched must be 'error' or 'drop', got {unmatched!r}")
 
         test_size = plain.get("test_size")
+        test_size_unit = plain.get("test_size_unit") or "examples"
+        if test_size_unit not in ("examples", "hours"):
+            raise ValueError(
+                f"split.test_size_unit must be 'examples' or 'hours', got {test_size_unit!r}"
+            )
+        if test_size_unit == "hours" and test_size is not None and test_size <= 0:
+            raise ValueError(f"split.test_size in hours must be positive, got {test_size!r}")
         test_remainder = plain.get("test_remainder") or "exclude"
         if test_remainder not in ("exclude", "train"):
             raise ValueError(
@@ -175,6 +188,7 @@ class SplitSpec:
             dev_group_by=plain.get("dev_group_by"),
             unmatched=unmatched,
             test_size=test_size,
+            test_size_unit=test_size_unit,
             test_group_by=plain.get("test_group_by"),
             test_remainder=test_remainder,
             train_budget=train_budget,
@@ -208,6 +222,8 @@ class SplitSpec:
                 option: value
                 for option, value in (
                     ("test_size", self.test_size),
+                    ("test_size_unit", None if self.test_size_unit == "examples"
+                     else self.test_size_unit),
                     ("test_group_by", self.test_group_by),
                     ("test_remainder", None if self.test_remainder == "exclude"
                      else self.test_remainder),
@@ -460,6 +476,8 @@ def assign_splits(
 
     if spec.train_budget is not None and spec.train_budget_unit == "hours" and durations is None:
         raise ValueError("split.train_budget in hours needs example durations.")
+    if spec.test_size is not None and spec.test_size_unit == "hours" and durations is None:
+        raise ValueError("split.test_size in hours needs example durations.")
 
     def column_of(index: int, column: str) -> tuple[str, ...]:
         return metadata[keys[index]][column]
@@ -493,7 +511,16 @@ def assign_splits(
         assignment["test"] = selected
     else:
         groups = [column_of(index, test_group_column) for index in selected]
-        test_mask = _sample_groups(groups, spec.test_size, seed)
+        test_sizes = None
+        if spec.test_size_unit == "hours":
+            # usable hours only: examples the length filter will drop count nothing
+            test_sizes = [
+                0.0
+                if max_duration is not None and durations[index] > max_duration
+                else durations[index] / 3600.0
+                for index in selected
+            ]
+        test_mask = _sample_groups(groups, spec.test_size, seed, sizes=test_sizes)
         for index, in_test in zip(selected, test_mask):
             if in_test:
                 assignment["test"].append(index)
@@ -632,41 +659,50 @@ def _sample_groups(
     groups: list[tuple[str, ...]],
     dev_size: float | int,
     seed: int,
+    sizes: list[float] | None = None,
 ) -> list[bool]:
-    """Pick whole groups for dev until the target number of examples is reached.
+    """Pick whole groups for dev (or test) until the target size is reached.
 
     Groups are shuffled with a seeded generator and taken in order until the
-    dev split holds at least `dev_size` examples (a fraction of all examples
-    when below 1). Keeping groups whole is the point: segments cut from one
-    recording must not straddle train and dev, or dev error is optimistic.
+    picked examples reach the target. Keeping groups whole is the point:
+    segments cut from one recording must not straddle train and dev, or dev
+    error is optimistic.
 
     Args:
         groups: Each example's group value (a tuple, as metadata cells are).
-        dev_size: Fraction (< 1) or number of examples.
+        dev_size: Without `sizes`, a fraction (< 1) or number of examples; with
+            `sizes`, the target total of `sizes` (e.g. hours).
         seed: Shuffle seed.
+        sizes: Each example's size in the target's unit, or None to count
+            examples.
 
     Returns:
-        A per-example mask, True for dev.
+        A per-example mask, True for picked examples.
     """
     if not groups or not dev_size:
         return [False] * len(groups)
 
-    if dev_size < 1:
-        target = int(round(dev_size * len(groups)))
+    if sizes is not None:
+        target = float(dev_size)
+        group_sizes: dict = {}
+        for group, size in zip(groups, sizes):
+            group_sizes[group] = group_sizes.get(group, 0.0) + size
     else:
-        target = int(dev_size)
-
-    sizes = Counter(groups)
-    ordered = sorted(sizes, key=str)
+        if dev_size < 1:
+            target = int(round(dev_size * len(groups)))
+        else:
+            target = int(dev_size)
+        group_sizes = Counter(groups)
+    ordered = sorted(group_sizes, key=str)
     random.Random(seed).shuffle(ordered)
 
     chosen: set = set()
-    taken = 0
+    taken = 0.0
     for group in ordered:
         if taken >= target:
             break
         chosen.add(group)
-        taken += sizes[group]
+        taken += group_sizes[group]
 
     return [group in chosen for group in groups]
 
