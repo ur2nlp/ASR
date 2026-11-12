@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from tools.transcriber_terms import log_odds_scores, tfidf_scores, tokenize
+from tools.transcriber_terms import label_tokens, log_odds_scores, tfidf_scores, tokenize
 
 
 class TestTokenize:
@@ -40,3 +40,9 @@ def test_log_odds_ranks_overused_shared_term_first():
     scores = log_odds_scores(counts, eligible, prior_strength=100.0)
     assert scores["A"]["x"] > 0 > scores["A"]["y"]
     assert scores["B"]["x"] < 0
+
+
+def test_label_tokens_match_training_labels():
+    # annotations dropped, lowercased, punctuation removed except the straight apostrophe
+    line = "Ngithi [inaudible] (mhm) K'thiwa... yebo, Hhayi!"
+    assert label_tokens(line) == ["ngithi", "k'thiwa", "yebo", "hhayi"]

@@ -19,6 +19,13 @@ annotations): bracketed annotations (``[...]``, ``(...)``, ``<...>``) are single
 words are runs of letters/digits/apostrophes (lowercased unless ``--keep-case``), and
 other punctuation runs (``...``, ``?``) are tokens too. Timestamp lines are skipped.
 
+With ``--text label`` the tokens are instead the training labels: each line goes through
+``prepare_zulu.clean_text`` (annotations removed) and ``src.preprocessing.normalize_text``
+with its defaults, which match ``configs/main.yaml`` (lowercase, punctuation removed except
+``'``, NFC), and is split on whitespace. Only differences that reach the model remain:
+spelling variants, how fillers are written, elisions. This mode imports ``src`` (and so
+``omegaconf``); run it from the project environment.
+
 Because small transcribers mostly own whole sessions, topic and name words would
 dominate; a term only counts for a transcriber if it occurs in at least
 ``--min-sessions`` of that transcriber's sessions.
@@ -39,7 +46,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-from tools.prepare_zulu import TIMESTAMP_LINE
+from tools.prepare_zulu import TIMESTAMP_LINE, clean_text
 
 TOKEN = re.compile(
     r"\[[^\]]*\]"
@@ -63,15 +70,31 @@ def tokenize(line: str, keep_case: bool = False) -> list[str]:
     return [token.lower() for token in tokens]
 
 
-def read_transcript_tokens(path: str, keep_case: bool) -> list[str]:
-    """Tokens of every non-timestamp line of a transcript."""
+def label_tokens(line: str) -> list[str]:
+    """Words of a raw transcript line as they appear in the training labels."""
+    from src.preprocessing import normalize_text
+
+    return normalize_text(clean_text(line)).split()
+
+
+def read_transcript_tokens(path: str, keep_case: bool, text: str = "raw") -> list[str]:
+    """Tokens of every non-timestamp line of a transcript.
+
+    Args:
+        path: Transcript path.
+        keep_case: Keep case in raw mode.
+        text: `raw` (words, annotations, punctuation) or `label` (training labels).
+    """
     tokens: list[str] = []
     with open(path, encoding="utf-8") as transcript_file:
         for line in transcript_file:
             stripped = line.strip()
             if not stripped or TIMESTAMP_LINE.match(stripped):
                 continue
-            tokens.extend(tokenize(stripped, keep_case))
+            if text == "label":
+                tokens.extend(label_tokens(stripped))
+            else:
+                tokens.extend(tokenize(stripped, keep_case))
     return tokens
 
 
@@ -79,6 +102,7 @@ def collect_counts(
     raw_dir: str,
     metadata_path: str,
     keep_case: bool,
+    text: str = "raw",
 ) -> tuple[dict[str, Counter], dict[str, dict[str, set]]]:
     """Count tokens per transcriber and record which sessions each term occurs in.
 
@@ -99,7 +123,7 @@ def collect_counts(
         if not os.path.isfile(path):
             continue
         transcriber = row["transcriber"]
-        for token in read_transcript_tokens(path, keep_case):
+        for token in read_transcript_tokens(path, keep_case, text):
             counts[transcriber][token] += 1
             sessions[transcriber][token].add(row["session"])
     return counts, sessions
@@ -177,13 +201,19 @@ def parse_args() -> argparse.Namespace:
         help="pseudo-tokens in the log-odds Dirichlet prior (larger shrinks rare terms more)",
     )
     parser.add_argument("--top", type=int, default=20, help="terms to print per transcriber")
-    parser.add_argument("--keep-case", action="store_true")
+    parser.add_argument("--keep-case", action="store_true", help="raw mode only")
+    parser.add_argument(
+        "--text",
+        choices=["raw", "label"],
+        default="raw",
+        help="raw transcript tokens, or the training labels (clean_text + normalize_text)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    counts, sessions = collect_counts(args.raw_dir, args.metadata, args.keep_case)
+    counts, sessions = collect_counts(args.raw_dir, args.metadata, args.keep_case, args.text)
     if not counts:
         sys.exit("no transcripts found")
     eligible = {
