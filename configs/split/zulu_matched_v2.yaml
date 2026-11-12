@@ -12,3 +12,10 @@ defaults:
 
 name: zulu-matched-v2
 key_pattern: '^([0-9a-f]{32})_\d+(?:_\d+)?\.wav$'
+
+# A fixed ~5 h of T as test (whole sessions, ~10-11 of ~0.5 h each; overshoot
+# <= one session), instead of v1's half of T: everything else of T is the
+# trained-on remainder, maximising the with/without contrast. The matched
+# budget is set by the without-T arm, so it does not depend on this.
+test_size: 5.0
+test_size_unit: hours
