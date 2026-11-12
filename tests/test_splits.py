@@ -370,6 +370,71 @@ class TestMatchedHoldout:
         with_t = self._spec(tmp_dir, test_remainder="train").split_id(seed=1)
         assert without != with_t
 
+    def _hour_spec(self, tmp_dir, test_hours, **overrides):
+        return self._spec(tmp_dir, test_size=test_hours, test_size_unit="hours", **overrides)
+
+    def test_test_size_in_hours_reaches_target_within_one_group(self, tmp_dir):
+        # each A session is 6 segments; one session's hours set the overshoot bound
+        session_hours = {
+            session: self._hours(
+                [i for i, path in enumerate(self.PATHS) if path.startswith(session)]
+            )
+            for session in (f"A{index}" for index in range(4))
+        }
+        target = 1.5 * min(session_hours.values())
+        result = self._assign(self._hour_spec(tmp_dir, target))
+        held_out = self._hours(result["test"])
+        assert target <= held_out <= target + max(session_hours.values())
+        assert self._transcribers(result["test"]) == {"A"}
+
+    def test_test_hours_count_only_usable_audio(self, tmp_dir):
+        """Segments the length filter will drop must not count toward the test target."""
+        durations = [
+            40.0 if path.startswith("A") and index % 2 == 0 else duration
+            for index, (path, duration) in enumerate(zip(self.PATHS, self.DURATIONS))
+        ]
+        usable_per_session = max(
+            sum(
+                durations[i]
+                for i, path in enumerate(self.PATHS)
+                if path.startswith(f"A{session}") and durations[i] <= 30
+            )
+            for session in range(4)
+        ) / 3600.0
+        target = 2.5 * usable_per_session
+        result = assign_splits(
+            self.PATHS,
+            self._hour_spec(tmp_dir, target),
+            seed=1,
+            durations=durations,
+            max_duration=30.0,
+        )
+        usable = sum(durations[i] for i in result["test"] if durations[i] <= 30) / 3600.0
+        assert usable >= target
+        # had the 40 s segments counted, two sessions would already have met the target
+        assert len(self._sessions(result["test"])) >= 3
+
+    def test_hour_test_pair_shares_test_and_dev(self, tmp_dir):
+        target = 0.01
+        without = self._assign(self._hour_spec(tmp_dir, target, test_remainder="exclude"))
+        with_t = self._assign(self._hour_spec(tmp_dir, target, test_remainder="train"))
+        assert without["test"] == with_t["test"]
+        assert without["dev"] == with_t["dev"]
+
+    def test_test_hours_need_durations(self, tmp_dir):
+        spec = self._hour_spec(tmp_dir, 0.01, train_budget=None)
+        with pytest.raises(ValueError, match="test_size in hours"):
+            assign_splits(self.PATHS, spec, seed=1)
+
+    def test_unknown_test_size_unit_rejected(self, tmp_dir):
+        with pytest.raises(ValueError, match="test_size_unit"):
+            self._spec(tmp_dir, test_size_unit="minutes")
+
+    def test_test_size_unit_changes_the_id(self, tmp_dir):
+        examples = self._spec(tmp_dir, test_size=2).split_id(seed=1)
+        hours = self._spec(tmp_dir, test_size=2, test_size_unit="hours").split_id(seed=1)
+        assert examples != hours
+
 
 class TestIdStability:
     def test_new_options_absent_from_record_when_unset(self, tmp_dir):
@@ -380,10 +445,16 @@ class TestIdStability:
         """
         record = _spec(tmp_dir, test={"transcriber": ["A"]}).record(seed=1)
         for option in (
-            "test_size", "test_group_by", "test_remainder",
+            "test_size", "test_size_unit", "test_group_by", "test_remainder",
             "train_budget", "train_budget_unit",
         ):
             assert option not in record
+
+    def test_default_test_size_unit_absent_from_record(self, tmp_dir):
+        """A split using test_size in examples keeps the id it had before the unit existed."""
+        spec = _spec(tmp_dir, test={"transcriber": ["A"]}, test_size=0.5)
+        assert "test_size" in spec.record(seed=1)
+        assert "test_size_unit" not in spec.record(seed=1)
 
     def test_split_record_has_hours_when_given_durations(self, tmp_dir):
         spec = _spec(tmp_dir, test={"transcriber": ["B"]})
