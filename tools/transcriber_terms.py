@@ -45,6 +45,19 @@ the first earlier (higher-scoring) group whose supporting words -- the fewest wo
 up ``--support-share`` of its excess -- overlap its own with Jaccard >= ``--group-jaccard``,
 so ``hlam``, ``lamp``, ``ampe`` from one word collapse into one group.
 
+With ``--segmentation`` the question is instead where each transcriber puts spaces.
+Every adjacent word pair ``a b`` whose concatenation ``ab`` also occurs as a single word
+somewhere in the corpus forms a *family* (``kodwa ke`` / ``kodwake``). Holding the letters
+fixed, each transcriber's split rate is compared with everyone else's as a log-odds z of
+split vs. joined, with the family's corpus-wide split rate as the prior (strength
+``--seg-prior``), so only the space -- not word choice -- can drive the score. Families are
+then pooled by their detached piece (all ``X ke`` / ``Xke`` families by right piece
+``ke``; all ``i X`` / ``iX`` by left piece ``i``) to show habits that recur across words.
+A family counts for a transcriber if either form occurs in ``--min-sessions`` of their
+sessions. Word tokens only; in label mode hyphens are removed, so ``i-consult`` counts as
+joined. Accidental coincidences (a real word that happens to equal two others joined)
+also form families; the pooling and session filter dampen them.
+
 Outputs a CSV (one row per transcriber x term with both scores and rates) and prints
 each transcriber's top terms. Standard library only, so it is fine on circ's login node.
 
@@ -414,6 +427,206 @@ def run_ngrams(
     print(f"\nwrote {len(rows)} rows to {args.output}", file=sys.stderr)
 
 
+def line_words(line: str, text: str) -> list[str]:
+    """The word tokens of one raw transcript line, in order."""
+    if text == "label":
+        return label_tokens(line)
+    return [token for token in tokenize(line) if WORD.match(token)]
+
+
+def collect_sequences(
+    raw_dir: str,
+    metadata_path: str,
+    text: str,
+) -> tuple[dict[str, Counter], dict[str, Counter], dict[str, dict], dict[str, dict]]:
+    """Count words and adjacent word pairs per transcriber, with the sessions they occur in.
+
+    Pairs never cross a line, so they never cross a timestamp.
+
+    Returns:
+        ``(unigrams, bigrams, unigram_sessions, bigram_sessions)`` keyed by transcriber;
+        bigrams are ``(left, right)`` tuples.
+    """
+    unigrams: dict[str, Counter] = defaultdict(Counter)
+    bigrams: dict[str, Counter] = defaultdict(Counter)
+    unigram_sessions: dict[str, dict] = defaultdict(lambda: defaultdict(set))
+    bigram_sessions: dict[str, dict] = defaultdict(lambda: defaultdict(set))
+    with open(metadata_path, encoding="utf-8", newline="") as metadata_file:
+        rows = list(csv.DictReader(metadata_file))
+    for row in rows:
+        if row["language"] == "english":
+            continue
+        path = os.path.join(raw_dir, f"{row['recording']}.txt")
+        if not os.path.isfile(path):
+            continue
+        transcriber = row["transcriber"]
+        session = row["session"]
+        with open(path, encoding="utf-8") as transcript_file:
+            for line in transcript_file:
+                stripped = line.strip()
+                if not stripped or TIMESTAMP_LINE.match(stripped):
+                    continue
+                words = line_words(stripped, text)
+                for word in words:
+                    unigrams[transcriber][word] += 1
+                    unigram_sessions[transcriber][word].add(session)
+                for pair in zip(words, words[1:]):
+                    bigrams[transcriber][pair] += 1
+                    bigram_sessions[transcriber][pair].add(session)
+    return unigrams, bigrams, unigram_sessions, bigram_sessions
+
+
+def split_log_odds(
+    split_own: float,
+    joined_own: float,
+    split_other: float,
+    joined_other: float,
+    prior_strength: float,
+) -> float:
+    """Log-odds z that a transcriber splits a sequence more often than everyone else.
+
+    The prior is the sequence's pooled split rate scaled to `prior_strength`
+    pseudo-occurrences, shared by both sides (cf. Monroe et al. 2008).
+    """
+    total = split_own + joined_own + split_other + joined_other
+    pooled = (split_own + split_other) / total
+    alpha_split = prior_strength * pooled
+    alpha_joined = prior_strength * (1.0 - pooled)
+    cells = (
+        split_own + alpha_split,
+        joined_own + alpha_joined,
+        split_other + alpha_split,
+        joined_other + alpha_joined,
+    )
+    if min(cells) <= 0:
+        return 0.0
+    delta = math.log(cells[0] / cells[1]) - math.log(cells[2] / cells[3])
+    return delta / math.sqrt(sum(1.0 / cell for cell in cells))
+
+
+def segmentation_families(
+    unigrams: dict[str, Counter],
+    bigrams: dict[str, Counter],
+) -> dict[tuple[str, str], str]:
+    """Adjacent pairs ``(a, b)`` whose concatenation also occurs as one word somewhere."""
+    vocabulary: set[str] = set()
+    for transcriber_unigrams in unigrams.values():
+        vocabulary.update(transcriber_unigrams)
+    families = {}
+    for transcriber_bigrams in bigrams.values():
+        for left, right in transcriber_bigrams:
+            joined = left + right
+            if joined in vocabulary:
+                families[(left, right)] = joined
+    return families
+
+
+def run_segmentation(args: argparse.Namespace) -> None:
+    """Score where each transcriber splits or joins the same letters, by family and piece."""
+    unigrams, bigrams, unigram_sessions, bigram_sessions = collect_sequences(
+        args.raw_dir, args.metadata, args.text
+    )
+    if not unigrams:
+        sys.exit("no transcripts found")
+    families = segmentation_families(unigrams, bigrams)
+    transcribers = sorted(unigrams)
+
+    def counts_for(pair: tuple[str, str]) -> dict[str, tuple[int, int]]:
+        joined = families[pair]
+        return {
+            transcriber: (bigrams[transcriber][pair], unigrams[transcriber][joined])
+            for transcriber in transcribers
+        }
+
+    family_counts = {pair: counts_for(pair) for pair in families}
+
+    family_rows = []
+    pooled: dict[tuple[str, str, str], list] = defaultdict(lambda: [0, 0, 0, 0, 0])
+    for pair, by_transcriber in family_counts.items():
+        joined = families[pair]
+        split_total = sum(split for split, _ in by_transcriber.values())
+        joined_total = sum(join for _, join in by_transcriber.values())
+        for transcriber, (split_own, joined_own) in by_transcriber.items():
+            sessions = bigram_sessions[transcriber].get(pair, set()) | unigram_sessions[
+                transcriber
+            ].get(joined, set())
+            if len(sessions) < args.min_sessions:
+                continue
+            split_other = split_total - split_own
+            joined_other = joined_total - joined_own
+            if split_other + joined_other == 0:
+                continue
+            z = split_log_odds(split_own, joined_own, split_other, joined_other, args.seg_prior)
+            family_rows.append(
+                {
+                    "transcriber": transcriber,
+                    "split_form": f"{pair[0]} {pair[1]}",
+                    "joined_form": joined,
+                    "split": split_own,
+                    "joined": joined_own,
+                    "split_rate": round(split_own / (split_own + joined_own), 3),
+                    "others_split": split_other,
+                    "others_joined": joined_other,
+                    "others_split_rate": round(split_other / (split_other + joined_other), 3),
+                    "sessions": len(sessions),
+                    "split_z": round(z, 3),
+                }
+            )
+            for side, piece in (("left", pair[0]), ("right", pair[1])):
+                entry = pooled[(transcriber, side, piece)]
+                entry[0] += split_own
+                entry[1] += joined_own
+                entry[2] += split_other
+                entry[3] += joined_other
+                entry[4] += 1
+
+    piece_rows = []
+    for (transcriber, side, piece), (s_own, j_own, s_oth, j_oth, n) in pooled.items():
+        if n < args.min_families:
+            continue
+        piece_rows.append(
+            {
+                "transcriber": transcriber,
+                "side": side,
+                "piece": piece,
+                "families": n,
+                "split": s_own,
+                "joined": j_own,
+                "split_rate": round(s_own / (s_own + j_own), 3) if s_own + j_own else None,
+                "others_split_rate": round(s_oth / (s_oth + j_oth), 3) if s_oth + j_oth else None,
+                "split_z": round(split_log_odds(s_own, j_own, s_oth, j_oth, args.seg_prior * n), 3),
+            }
+        )
+
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    stem, extension = os.path.splitext(args.output)
+    pieces_path = f"{stem}_pieces{extension or '.csv'}"
+    for path, rows in ((args.output, family_rows), (pieces_path, piece_rows)):
+        with open(path, "w", encoding="utf-8", newline="") as output_file:
+            writer = csv.DictWriter(output_file, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    for transcriber in transcribers:
+        own_pieces = [row for row in piece_rows if row["transcriber"] == transcriber]
+        print(f"\n== {transcriber}")
+        for label, reverse in (("splits more", True), ("joins more", False)):
+            ranked = sorted(own_pieces, key=lambda row: row["split_z"], reverse=reverse)
+            ranked = [row for row in ranked if (row["split_z"] > 0) == reverse][: args.top]
+            shown = ", ".join(
+                (f"{row['piece']} _" if row["side"] == "left" else f"_ {row['piece']}")
+                + f" ({row['split_rate']:.0%} vs {row['others_split_rate']:.0%}, "
+                f"{row['families']} fam)"
+                for row in ranked
+            )
+            print(f"  {label}: {shown}")
+    print(
+        f"\nwrote {len(family_rows)} family rows to {args.output} and "
+        f"{len(piece_rows)} piece rows to {pieces_path}",
+        file=sys.stderr,
+    )
+
+
 def is_annotation(term: str) -> bool:
     return term[:1] in ANNOTATION_START
 
@@ -463,6 +676,23 @@ def parse_args() -> argparse.Namespace:
         help="n-gram mode: supporting-word overlap needed to join a group",
     )
     parser.add_argument(
+        "--segmentation",
+        action="store_true",
+        help="compare split vs. joined spellings of the same letters (see module docstring)",
+    )
+    parser.add_argument(
+        "--seg-prior",
+        type=float,
+        default=5.0,
+        help="segmentation mode: prior pseudo-occurrences per family",
+    )
+    parser.add_argument(
+        "--min-families",
+        type=int,
+        default=3,
+        help="segmentation mode: families a detached piece needs to be reported",
+    )
+    parser.add_argument(
         "--text",
         choices=["raw", "label"],
         default="raw",
@@ -473,6 +703,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.segmentation:
+        run_segmentation(args)
+        return
     counts, sessions = collect_counts(args.raw_dir, args.metadata, args.keep_case, args.text)
     if not counts:
         sys.exit("no transcripts found")

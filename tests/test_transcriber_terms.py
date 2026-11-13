@@ -8,6 +8,8 @@ from tools.transcriber_terms import (
     group_by_support,
     label_tokens,
     log_odds_scores,
+    segmentation_families,
+    split_log_odds,
     supporting_words,
     tfidf_scores,
     tokenize,
@@ -104,3 +106,21 @@ def test_grouping_collapses_ngrams_of_one_word():
     ]
     assert group_by_support(ranked, 0.5) == [0, 1, 0, 2]
     assert group_by_support(ranked, 0.25) == [0, 1, 0, 1]
+
+
+def test_families_need_the_joined_form_somewhere():
+    unigrams = {"A": Counter({"kodwa": 3, "ke": 3}), "B": Counter({"kodwake": 2, "na": 1})}
+    bigrams = {"A": Counter({("kodwa", "ke"): 3, ("na", "mi"): 1}), "B": Counter()}
+    assert segmentation_families(unigrams, bigrams) == {("kodwa", "ke"): "kodwake"}
+
+
+class TestSplitLogOdds:
+    def test_splitting_more_than_others_is_positive(self):
+        assert split_log_odds(20, 2, 5, 40, 5.0) > 0
+        assert split_log_odds(2, 20, 40, 5, 5.0) < 0
+
+    def test_same_rate_is_zero(self):
+        assert abs(split_log_odds(10, 10, 30, 30, 5.0)) < 1e-9
+
+    def test_prior_shrinks_small_counts(self):
+        assert abs(split_log_odds(1, 0, 0, 1, 50.0)) < abs(split_log_odds(1, 0, 0, 1, 1.0))
